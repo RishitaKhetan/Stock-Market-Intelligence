@@ -77,3 +77,160 @@ def test_all_dropdown_tickers_load():
         except ValueError:
             failed.append(ticker)
     assert failed == []
+
+
+# --- News --------------------------------------------------------------------
+
+import src.data as data_module
+from src.data import is_about_ticker, load_news, parse_google_rss, parse_news_item
+
+NEW_FORMAT_ITEM = {
+    "id": "abc",
+    "content": {
+        "title": "Apple unveils new iPad",
+        "pubDate": "2026-10-20T14:30:00Z",
+        "provider": {"displayName": "Reuters"},
+        "canonicalUrl": {"url": "https://example.com/ipad"},
+    },
+}
+
+OLD_FORMAT_ITEM = {
+    "title": "Apple shares rise",
+    "publisher": "CNBC",
+    "link": "https://example.com/rise",
+    "providerPublishTime": 1793037674,  # 2026-10-26 18:01 UTC
+    "relatedTickers": ["AAPL"],
+}
+
+GOOGLE_RSS = """<?xml version="1.0"?>
+<rss><channel>
+  <item>
+    <title>TCS share price surges 28% in October - Business Standard</title>
+    <link>https://example.com/tcs-surge</link>
+    <pubDate>Fri, 23 Oct 2026 07:00:00 GMT</pubDate>
+    <source url="https://www.business-standard.com">Business Standard</source>
+  </item>
+  <item>
+    <title>Tata Consultancy Services (NSEI:TCS) Stock Price - Simply Wall Street</title>
+    <link>https://example.com/quote</link>
+    <pubDate>Thu, 22 Oct 2026 07:00:00 GMT</pubDate>
+    <source url="https://simplywall.st">Simply Wall Street</source>
+  </item>
+  <item>
+    <title>HDFCBANK Share Price Today - HDFC Bank on NSE/BSE - scanx.trade</title>
+    <link>https://example.com/quote2</link>
+    <pubDate>Sun, 25 Oct 2026 07:00:00 GMT</pubDate>
+    <source url="https://scanx.trade">scanx.trade</source>
+  </item>
+</channel></rss>"""
+
+
+def test_parse_news_new_format():
+    item = parse_news_item(NEW_FORMAT_ITEM)
+    assert item["title"] == "Apple unveils new iPad"
+    assert item["publisher"] == "Reuters"
+    assert item["link"] == "https://example.com/ipad"
+    assert item["published"] == pd.Timestamp("2026-10-20 14:30", tz="UTC")
+
+
+def test_parse_news_old_format():
+    item = parse_news_item(OLD_FORMAT_ITEM)
+    assert item["title"] == "Apple shares rise"
+    assert item["publisher"] == "CNBC"
+    assert item["link"] == "https://example.com/rise"
+    assert item["published"] == pd.Timestamp("2026-10-26 18:01:14", tz="UTC")
+
+
+def test_parse_news_skips_items_without_title():
+    assert parse_news_item({"publisher": "CNBC"}) is None
+    assert parse_news_item({"content": {"title": "  "}}) is None
+
+
+def test_is_about_ticker():
+    assert is_about_ticker({"relatedTickers": ["GOOG", "AAPL"]}, "AAPL")
+    assert not is_about_ticker({"relatedTickers": ["GOOG"]}, "AAPL")
+    assert not is_about_ticker({}, "AAPL")
+    # Same company on the other Indian exchange counts...
+    assert is_about_ticker({"relatedTickers": ["TCS.BO"]}, "TCS.NS")
+    # ...but a US company that happens to use the same letters does not.
+    assert not is_about_ticker({"relatedTickers": ["TCS"]}, "TCS.NS")
+
+
+def test_parse_google_rss_strips_publisher_and_skips_quote_pages():
+    items = parse_google_rss(GOOGLE_RSS)
+    assert [i["title"] for i in items] == ["TCS share price surges 28% in October"]
+    assert items[0]["publisher"] == "Business Standard"
+    assert items[0]["published"] == pd.Timestamp("2026-10-23 07:00", tz="UTC")
+
+
+def fake_yahoo(n):
+    """n old-format Yahoo items about AAPL, plus one unrelated item."""
+    items = [dict(OLD_FORMAT_ITEM, title=f"Apple story {i}",
+                  providerPublishTime=1793037674 + i) for i in range(n)]
+    return items + [dict(OLD_FORMAT_ITEM, title="Unrelated", relatedTickers=["MSFT"])]
+
+
+def test_load_news_uses_yahoo_when_enough(monkeypatch):
+    monkeypatch.setattr(data_module, "fetch_yahoo_items", lambda q: fake_yahoo(20))
+    called = []
+    monkeypatch.setattr(data_module, "fetch_google_rss",
+                        lambda q, india: called.append(q) or GOOGLE_RSS)
+
+    news = load_news("AAPL", company_name="Apple")
+    assert len(news) == config.MAX_HEADLINES
+    assert "Unrelated" not in [n["title"] for n in news]
+    assert news[0]["title"] == "Apple story 19"  # newest first
+    assert called == []                          # Google not needed
+
+
+def test_load_news_falls_back_to_google(monkeypatch):
+    monkeypatch.setattr(data_module, "fetch_yahoo_items", lambda q: fake_yahoo(0))
+    seen = {}
+    def fake_google(query, india):
+        seen.update(query=query, india=india)
+        return GOOGLE_RSS
+    monkeypatch.setattr(data_module, "fetch_google_rss", fake_google)
+
+    news = load_news("tcs.ns", company_name="Tata Consultancy Services")
+    assert [n["title"] for n in news] == ["TCS share price surges 28% in October"]
+    assert "Tata Consultancy Services" in seen["query"] and seen["india"] is True
+
+
+def test_load_news_returns_empty_list_on_errors(monkeypatch):
+    def boom(*args):
+        raise ConnectionError("no internet")
+    monkeypatch.setattr(data_module, "fetch_yahoo_items", boom)
+    monkeypatch.setattr(data_module, "fetch_google_rss", boom)
+    assert load_news("AAPL", company_name="Apple") == []
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("ticker", ["AAPL", "RELIANCE.NS"])
+def test_load_news_real(ticker):
+    news = load_news(ticker)
+    assert 0 < len(news) <= config.MAX_HEADLINES
+    assert set(news[0]) == {"title", "publisher", "link", "published"}
+
+
+def test_mentions_company():
+    from src.data import mentions_company, news_keywords
+
+    apple = news_keywords("AAPL", "Apple")
+    assert mentions_company("Apple unveils new iPad", apple)
+    assert mentions_company("Why AAPL stock fell today", apple)
+    assert not mentions_company("Tesla leaves the Magnificent 7 in the dust", apple)
+    assert not mentions_company("Pineapple prices rise", apple)  # whole words only
+
+    sbi = news_keywords("SBIN.NS", "State Bank of India")  # uses NEWS_KEYWORDS aliases
+    assert mentions_company("SBI shares hit record high", sbi)
+    assert not mentions_company("ICICI Bank share price prediction", sbi)
+
+
+def test_load_news_drops_headlines_not_about_the_company(monkeypatch):
+    items = fake_yahoo(10) + [dict(OLD_FORMAT_ITEM, title="Silver is down 17% in a month")]
+    monkeypatch.setattr(data_module, "fetch_yahoo_items", lambda q: items)
+    monkeypatch.setattr(data_module, "fetch_google_rss", lambda q, india: GOOGLE_RSS)
+
+    titles = [n["title"] for n in load_news("AAPL", company_name="Apple")]
+    assert "Silver is down 17% in a month" not in titles
+    assert len(titles) == 10

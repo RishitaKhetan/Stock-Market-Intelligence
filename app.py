@@ -3,11 +3,12 @@
 This file only draws the UI. All the real work lives in the src/ modules.
 """
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
-from src.data import load_prices, normalize_ticker
+from src.data import load_news, load_prices, normalize_ticker
 from src.features import add_moving_averages, make_dataset
 from src.model import (
     evaluate,
@@ -16,8 +17,14 @@ from src.model import (
     time_split,
     train_model,
 )
+from src.sentiment import load_analyzer, mood_summary, score_headlines
 
 st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
+
+# How each headline label is shown in the news table.
+LABEL_BADGES = {"positive": "🟢 positive", "negative": "🔴 negative", "neutral": "⚪ neutral"}
+# Mood word under the score: green for positive, red for negative, grey for neutral.
+MOOD_DELTA_COLOR = {"positive": "green", "negative": "red", "neutral": "gray"}
 
 
 # --- Cached steps (re-run at most once an hour per ticker) --------------------
@@ -43,6 +50,21 @@ def run_model(ticker: str) -> dict:
         "importance": feature_importance(final_model),
         "evaluation": evaluation,
     }
+
+
+@st.cache_resource(show_spinner="Loading FinBERT (first run downloads about 400 MB)...")
+def get_analyzer():
+    """Load the sentiment model once and share it across all users and reruns."""
+    return load_analyzer()
+
+
+@st.cache_data(ttl=1800, show_spinner="Reading the news with FinBERT...")
+def get_news_mood(ticker: str):
+    """Fetch headlines and score them. Returns (news, scores, engine name)."""
+    news = load_news(ticker)
+    analyzer, engine = get_analyzer()
+    scores = score_headlines([n["title"] for n in news], analyzer)
+    return news, scores, engine
 
 
 # --- Page --------------------------------------------------------------------
@@ -137,6 +159,48 @@ if analyze:
             margin=dict(l=10, r=10, t=40, b=10),
         )
         st.plotly_chart(bars, width="stretch")
+
+    # --- News mood ---------------------------------------------------------
+    st.header("News mood")
+    news, scores, engine = get_news_mood(ticker)
+
+    if not news:
+        st.info("No recent news found for this stock.")
+    else:
+        summary = mood_summary(scores)
+        col1, col2 = st.columns([1, 3])
+        col1.metric("Mood score (-1 to +1)", f"{summary['mean_score']:+.2f}",
+                    delta=summary["mood"], delta_color=MOOD_DELTA_COLOR[summary["mood"]],
+                    delta_arrow="off")
+        counts = summary["counts"]
+        col2.markdown(
+            f"**{len(scores)} recent headlines:** "
+            f":green[{counts['positive']} positive] · :red[{counts['negative']} negative] · "
+            f":gray[{counts['neutral']} neutral]"
+        )
+        col2.caption(f"Each headline scored by {engine}. "
+                     "Score = chance it is positive minus chance it is negative.")
+
+        table = pd.DataFrame({
+            "Mood": [LABEL_BADGES[label] for label in scores["label"]],
+            "Score": scores["score"].round(2),
+            "Headline": scores["title"],
+            "Source": [n["publisher"] for n in news],
+            "Date": [n["published"].strftime("%d %b") if pd.notna(n["published"]) else ""
+                     for n in news],
+            "Link": [n["link"] for n in news],
+        })
+        st.dataframe(
+            table,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Link": st.column_config.LinkColumn("Link", display_text="Open"),
+                "Score": st.column_config.NumberColumn(format="%+.2f"),
+            },
+        )
+        if engine != "FinBERT":
+            st.caption("FinBERT could not be loaded, so the simpler VADER scorer was used.")
 
     # --- Accuracy ----------------------------------------------------------
     ev = result["evaluation"]

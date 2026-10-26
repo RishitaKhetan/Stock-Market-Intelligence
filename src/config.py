@@ -35,3 +35,14 @@ POPULAR_TICKERS = {
     "ITC.NS": "ITC",
     "LT.NS": "Larsen & Toubro",
 }
+
+# A headline counts as "about" a stock only if its title mentions the symbol
+# (e.g. "TCS") or one of these names. Without an entry here, the first word
+# of the company name is used (e.g. "Apple", "Infosys").
+NEWS_KEYWORDS = {
+    "GOOGL": ["Google", "Alphabet"],
+    "JPM": ["JPMorgan", "JP Morgan"],
+    "SBIN.NS": ["SBI", "State Bank of India"],
+    "BHARTIARTL.NS": ["Airtel", "Bharti"],
+    "LT.NS": ["L&T", "Larsen"],
+}
