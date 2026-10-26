@@ -1,9 +1,20 @@
 """Tests for src/features.py."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from src.features import add_moving_averages
+from src.features import (
+    FEATURE_COLUMNS,
+    FEATURE_LABELS,
+    add_label,
+    add_moving_averages,
+    build_features,
+    compute_rsi,
+    make_dataset,
+)
+
+WARM_UP = 50  # rows needed before the longest window (MA50) is full
 
 
 def make_prices(closes):
@@ -11,6 +22,17 @@ def make_prices(closes):
     dates = pd.bdate_range("2024-01-01", periods=len(closes))
     return pd.DataFrame({"Close": closes}, index=dates, dtype=float)
 
+
+def make_random_prices(n=300, seed=0):
+    """A realistic-looking random walk with Close and Volume."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2020-01-01", periods=n)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
+    volume = rng.integers(1_000_000, 5_000_000, n).astype(float)
+    return pd.DataFrame({"Close": close, "Volume": volume}, index=dates)
+
+
+# --- Moving averages ---------------------------------------------------------
 
 def test_ma20_known_values():
     df = add_moving_averages(make_prices(range(1, 101)))  # Close = 1..100
@@ -33,3 +55,75 @@ def test_moving_averages_do_not_change_input():
     prices = make_prices(range(1, 101))
     add_moving_averages(prices)
     assert list(prices.columns) == ["Close"]
+
+
+# --- Features ----------------------------------------------------------------
+
+def test_feature_columns_and_labels_match():
+    features = build_features(make_random_prices())
+    assert list(features.columns) == FEATURE_COLUMNS
+    assert set(FEATURE_LABELS) == set(FEATURE_COLUMNS)
+
+
+def test_no_nan_after_warm_up():
+    features = build_features(make_random_prices())
+    assert features.iloc[WARM_UP:].notna().all().all()
+
+
+def test_no_look_ahead_leakage():
+    """Changing the future must not change any feature on day t or before."""
+    prices = make_random_prices()
+    t = 200
+    before = build_features(prices)
+
+    changed = prices.copy()
+    changed.iloc[t + 1:, changed.columns.get_loc("Close")] *= 3      # big jump
+    changed.iloc[t + 1:, changed.columns.get_loc("Volume")] *= 10
+    after = build_features(changed)
+
+    pd.testing.assert_frame_equal(before.iloc[: t + 1], after.iloc[: t + 1])
+    # Sanity check: the future rows really did change.
+    assert not before.iloc[t + 1:].equals(after.iloc[t + 1:])
+
+
+def test_rsi_extremes():
+    assert compute_rsi(make_prices(range(1, 60))["Close"]).iloc[-1] == pytest.approx(100)
+    assert compute_rsi(make_prices(range(60, 1, -1))["Close"]).iloc[-1] == pytest.approx(0)
+    assert compute_rsi(make_prices([5.0] * 30)["Close"]).iloc[-1] == pytest.approx(50)
+
+
+def test_rsi_stays_between_0_and_100():
+    rsi = compute_rsi(make_random_prices()["Close"]).dropna()
+    assert rsi.between(0, 100).all()
+
+
+# --- Label -------------------------------------------------------------------
+
+def test_label_rising_series():
+    horizon = 5
+    df = add_label(make_prices(range(1, 101)), horizon=horizon)
+
+    assert (df["target"].iloc[:-horizon] == 1).all()
+    assert df["target"].iloc[-horizon:].isna().all()
+
+
+def test_label_falling_series_is_all_down():
+    df = add_label(make_prices(range(100, 0, -1)), horizon=5)
+    assert (df["target"].iloc[:-5] == 0).all()
+
+
+# --- Dataset -----------------------------------------------------------------
+
+def test_make_dataset_shapes_and_latest_row():
+    prices = make_random_prices()
+    X, y, latest_row = make_dataset(prices)
+
+    assert list(X.columns) == FEATURE_COLUMNS
+    assert X.index.equals(y.index)
+    assert X.notna().all().all() and y.notna().all()
+    assert set(y.unique()) <= {0, 1}
+    # Warm-up rows at the start and the last 5 unlabelled rows are dropped.
+    assert len(X) == len(prices) - WARM_UP + 1 - 5
+    # The live prediction uses the most recent day in the data.
+    assert latest_row.index[-1] == prices.index[-1]
+    assert len(latest_row) == 1

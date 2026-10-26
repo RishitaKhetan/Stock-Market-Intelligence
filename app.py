@@ -6,9 +6,9 @@ This file only draws the UI. All the real work lives in the src/ modules.
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.config import CHART_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
+from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
 from src.data import load_prices, normalize_ticker
-from src.features import add_moving_averages
+from src.features import FEATURE_LABELS, add_moving_averages, make_dataset
 
 st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
 
@@ -70,3 +70,13 @@ if analyze:
     # Kept for checking the download; collapsed so it stays out of the way.
     with st.expander("Show raw data (last 5 days)"):
         st.dataframe(prices.tail())
+
+    # --- Model data (temporary check, replaced by the prediction later) -----
+    X, y, latest_row = make_dataset(prices)
+    st.subheader("Model data (temporary)")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Training examples", f"{X.shape[0]:,} days")
+    col2.metric("Features per day", X.shape[1])
+    col3.metric(f"Share of UP labels ({HORIZON_DAYS}-day)", f"{y.mean():.1%}")
+    with st.expander("Show latest feature values"):
+        st.dataframe(latest_row.rename(columns=FEATURE_LABELS).T.round(4))
