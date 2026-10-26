@@ -24,6 +24,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+If you edit files in `src/` while the app is running and see an `ImportError`, stop the server (Ctrl+C) and run `streamlit run app.py` again.
+
 ## Run the tests
 
 ```bash

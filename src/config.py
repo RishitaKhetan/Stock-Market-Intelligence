@@ -10,3 +10,28 @@ RSI_WINDOW = 14
 RANDOM_STATE = 42
 FINBERT_MODEL = "ProsusAI/finbert"
 MAX_HEADLINES = 15
+
+# Suggestions for the ticker dropdown (symbol -> company name).
+# Any other Yahoo Finance symbol can still be typed in by the user.
+POPULAR_TICKERS = {
+    # US stocks
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "GOOGL": "Alphabet (Google)",
+    "AMZN": "Amazon",
+    "NVDA": "NVIDIA",
+    "META": "Meta Platforms",
+    "TSLA": "Tesla",
+    "JPM": "JPMorgan Chase",
+    "NFLX": "Netflix",
+    # Indian stocks (NSE symbols end in .NS)
+    "RELIANCE.NS": "Reliance Industries",
+    "TCS.NS": "Tata Consultancy Services",
+    "INFY.NS": "Infosys",
+    "HDFCBANK.NS": "HDFC Bank",
+    "ICICIBANK.NS": "ICICI Bank",
+    "SBIN.NS": "State Bank of India",
+    "BHARTIARTL.NS": "Bharti Airtel",
+    "ITC.NS": "ITC",
+    "LT.NS": "Larsen & Toubro",
+}
