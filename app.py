@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.backtest import run_backtest
 from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
 from src.data import load_news, load_prices, normalize_ticker
 from src.features import add_moving_averages, make_dataset
@@ -14,6 +15,7 @@ from src.model import (
     evaluate,
     feature_importance,
     predict_latest,
+    predict_proba_up,
     time_split,
     train_model,
 )
@@ -41,7 +43,10 @@ def run_model(ticker: str) -> dict:
 
     # 1) Honest score: train on older data, test on the most recent year.
     X_train, X_test, y_train, y_test = time_split(X, y)
-    evaluation = evaluate(train_model(X_train, y_train), X_test, y_test)
+    held_out_model = train_model(X_train, y_train)
+    evaluation = evaluate(held_out_model, X_test, y_test)
+    # P(UP) on each test day, from the model that never saw those days (for the backtest).
+    test_probs = predict_proba_up(held_out_model, X_test)
 
     # 2) Live prediction: retrain on all labelled days so it knows the newest data.
     final_model = train_model(X, y)
@@ -49,6 +54,7 @@ def run_model(ticker: str) -> dict:
         "prob_up": predict_latest(final_model, latest_row),
         "importance": feature_importance(final_model),
         "evaluation": evaluation,
+        "test_probs": test_probs,
     }
 
 
@@ -214,4 +220,39 @@ if analyze:
         f"Tested on {ev['test_start'].date()} to {ev['test_end'].date()}: "
         "the most recent year, which the model never saw during training. "
         "The baseline is right on every UP day, so the model must beat it to be useful."
+    )
+
+    # --- Backtest ----------------------------------------------------------
+    # Indian stocks are priced in rupees, the rest in dollars.
+    money = "₹" if ticker.endswith((".NS", ".BO")) else "$"
+    bt = run_backtest(prices, result["test_probs"])
+    final_strategy = bt["strategy_value"].iloc[-1]
+    final_hold = bt["buy_hold_value"].iloc[-1]
+
+    st.header("Backtest: would following the model have paid off?")
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"{money}100 following the model", f"{money}{final_strategy:,.2f}",
+                delta=f"{final_strategy - 100:+.1f}%")
+    col2.metric(f"{money}100 just holding the stock", f"{money}{final_hold:,.2f}",
+                delta=f"{final_hold - 100:+.1f}%")
+    col3.metric("Days invested", f"{bt['invested'].sum()} of {len(bt)}")
+
+    line = go.Figure()
+    line.add_trace(go.Scatter(x=bt.index, y=bt["strategy_value"],
+                              name="Following the model", line=dict(width=2)))
+    line.add_trace(go.Scatter(x=bt.index, y=bt["buy_hold_value"],
+                              name="Just holding the stock", line=dict(dash="dash")))
+    line.update_layout(
+        title=f"{money}100 following the model vs {money}100 just holding the stock",
+        xaxis_title="Date",
+        yaxis_title=f"Value ({money})",
+        hovermode="x unified",
+        legend=dict(orientation="h", y=-0.2),
+    )
+    st.plotly_chart(line, width="stretch")
+    st.caption(
+        f"Same test year as above ({bt.index[0].date()} to {bt.index[-1].date()}). "
+        f"The model invests for the next day only when it says UP is more likely than DOWN, "
+        "otherwise it holds cash. Ignores trading costs and taxes. "
+        "Past results do not predict future results."
     )
