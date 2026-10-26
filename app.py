@@ -27,6 +27,8 @@ st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
 LABEL_BADGES = {"positive": "🟢 positive", "negative": "🔴 negative", "neutral": "⚪ neutral"}
 # Mood word under the score: green for positive, red for negative, grey for neutral.
 MOOD_DELTA_COLOR = {"positive": "green", "negative": "red", "neutral": "gray"}
+# One-click examples in the sidebar: two US stocks and one Indian stock.
+EXAMPLE_TICKERS = ["AAPL", "NVDA", "RELIANCE.NS"]
 
 
 # --- Cached steps (re-run at most once an hour per ticker) --------------------
@@ -78,19 +80,39 @@ def get_news_mood(ticker: str):
 st.title("Stock Market Intelligence")
 st.caption("Educational demo, not financial advice.")
 
+# Remember the chosen ticker and the last analysed one across reruns, so the
+# results stay on screen while the user scrolls or opens an expander.
+st.session_state.setdefault("ticker", "AAPL")
+st.session_state.setdefault("analyzed", None)
+
+
+def analyze_example(symbol: str):
+    """Sidebar button: pick this ticker in the dropdown and analyse it."""
+    st.session_state.ticker = symbol
+    st.session_state.analyzed = symbol
+
+
+with st.sidebar:
+    st.header("Try an example")
+    for symbol in EXAMPLE_TICKERS:
+        st.button(f"{symbol} - {POPULAR_TICKERS[symbol]}", key=f"example_{symbol}",
+                  on_click=analyze_example, args=(symbol,), width="stretch")
+    st.caption("Or pick any stock in the dropdown, or type a Yahoo Finance symbol.")
+
 ticker = st.selectbox(
     "Stock ticker",
     options=list(POPULAR_TICKERS),
-    index=0,  # AAPL
+    key="ticker",
     # Show "AAPL - Apple"; a typed-in symbol is shown as-is.
     format_func=lambda t: f"{t} - {POPULAR_TICKERS[t]}" if t in POPULAR_TICKERS else t,
     accept_new_options=True,
     help="Pick a stock, or type any Yahoo Finance symbol (Indian NSE stocks end in .NS).",
 )
-analyze = st.button("Analyze", type="primary")
+if st.button("Analyze", type="primary"):
+    st.session_state.analyzed = normalize_ticker(ticker or "")  # None if box cleared
 
-if analyze:
-    ticker = normalize_ticker(ticker or "")  # None if the box was cleared
+if st.session_state.analyzed is not None:
+    ticker = st.session_state.analyzed
     try:
         prices = get_prices(ticker)
     except ValueError as err:
@@ -255,4 +277,25 @@ if analyze:
         f"The model invests for the next day only when it says UP is more likely than DOWN, "
         "otherwise it holds cash. Ignores trading costs and taxes. "
         "Past results do not predict future results."
+    )
+
+# --- How it works (always shown at the bottom) ---------------------------------
+with st.expander("How it works"):
+    st.markdown(
+        f"""
+1. **Prices:** we download about 5 years of daily prices from Yahoo Finance.
+2. **Features:** from the prices we compute 8 simple signals, such as recent returns,
+   distance from the 20- and 50-day averages, volatility, RSI and volume change.
+   Each one uses only data up to that day, never the future.
+3. **Model:** a random forest (many small decision trees that vote) learns whether
+   the price was higher {HORIZON_DAYS} trading days later. The "Why this prediction?"
+   chart shows which signals it relied on most.
+4. **Honest testing:** it trains on older years and is scored on the most recent year,
+   which it never saw. It is compared with simply guessing "UP" every day.
+5. **News mood:** recent headlines are scored by FinBERT, a language model trained
+   on financial text, as positive, negative or neutral. The news is shown alongside
+   the prediction and is not an input to the model.
+6. **Backtest:** we replay the test year, investing only on days the model said UP,
+   and compare the result with simply holding the stock.
+"""
     )
