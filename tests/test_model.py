@@ -14,6 +14,7 @@ from src.model import (
     time_split,
     train_model,
     train_regressor,
+    walk_forward_predictions,
 )
 
 
@@ -124,3 +125,26 @@ def test_feature_importance_works_for_regressor():
     importance = feature_importance(train_regressor(X, y))
     assert importance.sum() == pytest.approx(1.0)
     assert importance.index[0] == FEATURE_LABELS["ret_5"]
+
+
+def test_walk_forward_first_block_is_nan_rest_predicted():
+    X, y, _ = make_learnable_returns(n=600)
+    predictions = walk_forward_predictions(X, y, n_splits=5)
+
+    first_block = 600 // 6      # TimeSeriesSplit: 6 equal blocks, first is never tested
+    assert predictions.iloc[:first_block].isna().all()
+    assert predictions.iloc[first_block:].notna().all()
+    assert predictions.index.equals(X.index)
+
+
+def test_walk_forward_never_sees_the_future():
+    X, y, _ = make_learnable_returns(n=600)
+    # Wreck every label from row 400 on. Test blocks start at rows 100, 200, ..., 500,
+    # and the block 400-499 trains on rows < 395, so only rows 500+ may change.
+    y_broken = y.copy()
+    y_broken.iloc[400:] = 99.0
+    before = walk_forward_predictions(X, y)
+    after = walk_forward_predictions(X, y_broken)
+    # approx: parallel trees add up in a random order, so the last digits wobble.
+    assert after.iloc[100:500].values == pytest.approx(before.iloc[100:500].values)
+    assert after.iloc[500:].values != pytest.approx(before.iloc[500:].values)

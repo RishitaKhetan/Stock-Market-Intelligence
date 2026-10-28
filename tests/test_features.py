@@ -8,6 +8,7 @@ from src.features import (
     FEATURE_COLUMNS,
     FEATURE_LABELS,
     add_label,
+    add_above_label,
     add_moving_averages,
     add_return_label,
     build_features,
@@ -160,3 +161,15 @@ def test_make_price_dataset_shapes():
     # The return turns each close back into the real price 5 days later.
     later = prices["Close"].shift(-5).loc[X.index]
     assert (closes * (1 + y)).values == pytest.approx(later.values)
+
+
+def test_above_label_known_values():
+    close = make_prices([100, 100, 110, 90, 100])["Close"]
+    predicted = pd.Series([105.0, 95.0, float("nan"), 100.0, 100.0], index=close.index)
+    above = add_above_label(close, predicted, horizon=1)
+
+    assert above.iloc[0] == 0.0          # real 100 is below the predicted 105
+    assert above.iloc[1] == 1.0          # real 110 is above the predicted 95
+    assert pd.isna(above.iloc[2])        # no prediction for that day
+    assert above.iloc[3] == 0.0          # equal is not above
+    assert pd.isna(above.iloc[4])        # future still unknown

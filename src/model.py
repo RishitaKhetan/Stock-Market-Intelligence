@@ -2,8 +2,9 @@
 
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.model_selection import TimeSeriesSplit
 
-from src.config import RANDOM_STATE, TEST_DAYS
+from src.config import HORIZON_DAYS, RANDOM_STATE, TEST_DAYS
 from src.features import FEATURE_LABELS
 
 
@@ -110,6 +111,20 @@ def predict_price(model: RandomForestRegressor, latest_row: pd.DataFrame,
                   last_close: float) -> float:
     """Predicted price in HORIZON_DAYS trading days: today's close x (1 + predicted return)."""
     return float(last_close * (1 + model.predict(latest_row)[-1]))
+
+
+def walk_forward_predictions(X: pd.DataFrame, y_return: pd.Series, n_splits: int = 5) -> pd.Series:
+    """Out-of-sample predicted returns: each day is predicted by a model trained only on earlier days.
+
+    Like re-running the model every few months in real life. The first block has no
+    earlier data to learn from, so it stays NaN. A gap of HORIZON_DAYS rows is left
+    before each test block, because the last training labels look that far ahead.
+    """
+    predictions = pd.Series(float("nan"), index=X.index)
+    for train_rows, test_rows in TimeSeriesSplit(n_splits=n_splits, gap=HORIZON_DAYS).split(X):
+        model = train_regressor(X.iloc[train_rows], y_return.iloc[train_rows])
+        predictions.iloc[test_rows] = model.predict(X.iloc[test_rows])
+    return predictions
 
 
 def feature_importance(model) -> pd.Series:

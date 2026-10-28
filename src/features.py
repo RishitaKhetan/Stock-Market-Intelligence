@@ -113,6 +113,20 @@ def add_return_label(df: pd.DataFrame, horizon: int = HORIZON_DAYS) -> pd.DataFr
     return df
 
 
+def add_above_label(close: pd.Series, predicted_price: pd.Series,
+                    horizon: int = HORIZON_DAYS) -> pd.Series:
+    """The answer for stage 2: did the real price end up ABOVE the predicted one?
+
+    above = 1 if Close[t + horizon] > predicted_price[t], else 0.
+    `close` is the full Close series; the result follows predicted_price's dates.
+    NaN where the prediction or the future price is unknown.
+    """
+    future_close = close.shift(-horizon).reindex(predicted_price.index)
+    above = (future_close > predicted_price).astype(float)
+    above[future_close.isna() | predicted_price.isna()] = np.nan
+    return above
+
+
 def make_price_dataset(df: pd.DataFrame):
     """Like make_dataset, but the answer is a return (a number), not UP/DOWN.
 
