@@ -9,9 +9,11 @@ from src.features import (
     FEATURE_LABELS,
     add_label,
     add_moving_averages,
+    add_return_label,
     build_features,
     compute_rsi,
     make_dataset,
+    make_price_dataset,
 )
 
 WARM_UP = 50  # rows needed before the longest window (MA50) is full
@@ -127,3 +129,34 @@ def test_make_dataset_shapes_and_latest_row():
     # The live prediction uses the most recent day in the data.
     assert latest_row.index[-1] == prices.index[-1]
     assert len(latest_row) == 1
+
+
+# --- Return label and price dataset (stage 1) ---------------------------------
+
+def test_return_label_known_values():
+    df = add_return_label(make_prices([100, 110, 121, 100]), horizon=1)
+
+    assert df["future_return"].iloc[0] == pytest.approx(0.10)
+    assert df["future_return"].iloc[1] == pytest.approx(0.10)
+    assert df["future_return"].iloc[2] == pytest.approx(100 / 121 - 1)
+    assert pd.isna(df["future_return"].iloc[-1])   # no known future yet
+
+
+def test_return_label_last_horizon_rows_are_nan():
+    df = add_return_label(make_prices(range(1, 101)), horizon=5)
+    assert df["future_return"].iloc[-5:].isna().all()
+    assert df["future_return"].iloc[:-5].notna().all()
+
+
+def test_make_price_dataset_shapes():
+    prices = make_random_prices()
+    X, y, latest_row, closes = make_price_dataset(prices)
+
+    assert list(X.columns) == FEATURE_COLUMNS
+    assert X.index.equals(y.index) and X.index.equals(closes.index)
+    assert X.notna().all().all() and y.notna().all()
+    assert len(X) == len(prices) - WARM_UP + 1 - 5
+    assert latest_row.index[-1] == prices.index[-1]
+    # The return turns each close back into the real price 5 days later.
+    later = prices["Close"].shift(-5).loc[X.index]
+    assert (closes * (1 + y)).values == pytest.approx(later.values)

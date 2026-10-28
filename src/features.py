@@ -102,6 +102,37 @@ def add_label(df: pd.DataFrame, horizon: int = HORIZON_DAYS) -> pd.DataFrame:
     return df
 
 
+def add_return_label(df: pd.DataFrame, horizon: int = HORIZON_DAYS) -> pd.DataFrame:
+    """Add the number the price model must learn: the return over the next `horizon` days.
+
+    future_return = Close[t + horizon] / Close[t] - 1 (e.g. 0.02 means +2%).
+    The last `horizon` days don't have a known future yet, so it is NaN.
+    """
+    df = df.copy()
+    df["future_return"] = df["Close"].shift(-horizon) / df["Close"] - 1
+    return df
+
+
+def make_price_dataset(df: pd.DataFrame):
+    """Like make_dataset, but the answer is a return (a number), not UP/DOWN.
+
+    Returns:
+        X: features for every day with full features and a known future return
+        y: the matching future returns
+        latest_row: features of the most recent day, for today's prediction
+        closes: the Close price on each day of X (turns returns into prices)
+    """
+    features = build_features(df)
+    future_return = add_return_label(df)["future_return"]
+
+    labelled = features.join(future_return).dropna()
+    X = labelled[FEATURE_COLUMNS]
+    y = labelled["future_return"]
+    latest_row = features.iloc[[-1]]
+    closes = df["Close"].loc[X.index]
+    return X, y, latest_row, closes
+
+
 def make_dataset(df: pd.DataFrame):
     """Split a price table into what the model trains on and what it predicts.
 

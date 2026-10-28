@@ -10,14 +10,17 @@ import streamlit as st
 from src.backtest import run_backtest
 from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
 from src.data import load_news_headlines, load_price_history, normalize_ticker_symbol
-from src.features import add_moving_averages, make_dataset
+from src.features import add_moving_averages, make_dataset, make_price_dataset
 from src.model import (
     evaluate,
+    evaluate_regression,
     feature_importance,
     predict_latest,
+    predict_price,
     predict_proba_up,
     time_split,
     train_model,
+    train_regressor,
 )
 from src.sentiment import load_sentiment_analyzer, summarize_news_mood, score_headline_sentiment
 
@@ -52,10 +55,20 @@ def run_model(ticker: str) -> dict:
 
     # 2) Live prediction: retrain on all labelled days so it knows the newest data.
     final_model = train_model(X, y)
+
+    # Stage 1: the same steps, but predicting the price in HORIZON_DAYS days.
+    prices = get_prices(ticker)
+    X_p, y_p, latest_p, closes = make_price_dataset(prices)
+    Xp_train, Xp_test, yp_train, yp_test = time_split(X_p, y_p)
+    price_evaluation = evaluate_regression(train_regressor(Xp_train, yp_train), Xp_test,
+                                           yp_test, closes.loc[Xp_test.index])
+    final_regressor = train_regressor(X_p, y_p)
     return {
         "prob_up": predict_latest(final_model, latest_row),
-        "importance": feature_importance(final_model),
+        "predicted_price": predict_price(final_regressor, latest_p, prices["Close"].iloc[-1]),
+        "importance": feature_importance(final_regressor),
         "evaluation": evaluation,
+        "price_evaluation": price_evaluation,
         "test_probs": test_probs,
     }
 
@@ -123,6 +136,12 @@ if st.session_state.analyzed is not None:
     end = prices.index[-1].date()
     st.success(f"Loaded {len(prices):,} days of prices for {ticker} ({start} to {end}).")
 
+    try:
+        result = run_model(ticker)
+    except ValueError as err:
+        st.error(f"Can't build a prediction for {ticker}: {err}")
+        st.stop()
+
     # --- Price chart -------------------------------------------------------
     prices = add_moving_averages(prices)
     recent = prices.tail(CHART_DAYS)
@@ -143,6 +162,12 @@ if st.session_state.analyzed is not None:
                              name=f"{MA_SHORT}-day average", line=dict(dash="dash")))
     fig.add_trace(go.Scatter(x=recent.index, y=recent[f"MA{MA_LONG}"],
                              name=f"{MA_LONG}-day average", line=dict(dash="dot")))
+    # Weekends skipped; market holidays are not, so the date can be a day or two early.
+    target_date = prices.index[-1] + pd.offsets.BDay(HORIZON_DAYS)
+    fig.add_trace(go.Scatter(x=[prices.index[-1], target_date],
+                             y=[latest_close, result["predicted_price"]],
+                             name=f"Predicted price in {HORIZON_DAYS} days",
+                             mode="lines+markers", line=dict(dash="dot")))
     fig.update_layout(
         title=f"{ticker}: last 6 months",
         xaxis_title="Date",
@@ -157,16 +182,13 @@ if st.session_state.analyzed is not None:
         st.dataframe(prices.tail())
 
     # --- Prediction --------------------------------------------------------
-    try:
-        result = run_model(ticker)
-    except ValueError as err:
-        st.error(f"Can't build a prediction for {ticker}: {err}")
-        st.stop()
-
     st.header("Prediction")
     left, right = st.columns([2, 3])
 
     with left:
+        predicted = result["predicted_price"]
+        st.metric(f"Predicted price in {HORIZON_DAYS} trading days", f"{predicted:,.2f}",
+                  delta=f"{(predicted / latest_close - 1) * 100:+.2f}% vs latest close")
         # Colour by the rounded number shown, so "UP 50%" is never painted red.
         up_pct = round(result["prob_up"] * 100)
         color = "green" if up_pct > 50 else "red" if up_pct < 50 else "gray"
@@ -231,17 +253,21 @@ if st.session_state.analyzed is not None:
             st.caption("FinBERT could not be loaded, so the simpler VADER scorer was used.")
 
     # --- Accuracy ----------------------------------------------------------
-    ev = result["evaluation"]
+    ev = result["price_evaluation"]
     st.header("How accurate is it?")
     col1, col2 = st.columns(2)
-    gap = (ev["model_accuracy"] - ev["baseline_accuracy"]) * 100
-    col1.metric("Model accuracy", f"{ev['model_accuracy']:.1%}",
-                delta=f"{gap:+.1f} pts vs baseline")
-    col2.metric('Baseline: "always guess UP"', f"{ev['baseline_accuracy']:.1%}")
+    # Smaller miss is better, so a negative gap is shown in green.
+    col1.metric("Model: average miss", f"{ev['model_mae']:,.2f}",
+                delta=f"{ev['model_mae'] - ev['naive_mae']:+,.2f} vs baseline",
+                delta_color="inverse")
+    col1.caption(f"{ev['model_mape']:.2%} of the price")
+    col2.metric('Baseline: "no change"', f"{ev['naive_mae']:,.2f}")
+    col2.caption(f"{ev['naive_mape']:.2%} of the price")
     st.caption(
-        f"Tested on {ev['test_start'].date()} to {ev['test_end'].date()}: "
-        "the most recent year, which the model never saw during training. "
-        "The baseline is right on every UP day, so the model must beat it to be useful."
+        f"Average gap between the predicted and the real price {HORIZON_DAYS} trading days later, "
+        f"tested on {ev['test_start'].date()} to {ev['test_end'].date()}: the most recent year, "
+        "which the model never saw during training. The baseline guesses today's price, "
+        "so the model must miss by less to be useful."
     )
 
     # --- Backtest ----------------------------------------------------------

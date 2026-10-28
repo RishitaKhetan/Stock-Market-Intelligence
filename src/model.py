@@ -1,7 +1,7 @@
 """Training the model, measuring it honestly, and explaining its prediction."""
 
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 from src.config import RANDOM_STATE, TEST_DAYS
 from src.features import FEATURE_LABELS
@@ -68,7 +68,51 @@ def predict_latest(model: RandomForestClassifier, latest_row: pd.DataFrame) -> f
     return float(predict_proba_up(model, latest_row).iloc[-1])
 
 
-def feature_importance(model: RandomForestClassifier) -> pd.Series:
+def train_regressor(X_train: pd.DataFrame, y_train: pd.Series) -> RandomForestRegressor:
+    """Train a random forest that predicts a number (the future return).
+
+    Same shallow settings as the classifier, for the same reason: stock data is
+    noisy, and deep trees would memorise that noise.
+    """
+    model = RandomForestRegressor(
+        n_estimators=300,
+        max_depth=5,
+        min_samples_leaf=20,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+    )
+    model.fit(X_train, y_train)
+    return model
+
+
+def evaluate_regression(model: RandomForestRegressor, X_test: pd.DataFrame,
+                        y_test: pd.Series, closes_test: pd.Series) -> dict:
+    """Score the price predictions on unseen days, against a naive baseline.
+
+    The baseline "no change" guesses that the price in HORIZON_DAYS days equals
+    today's price. A useful model has to miss by less than that.
+    MAE = average miss in price units; MAPE = average miss as a % of the price.
+    """
+    actual = closes_test * (1 + y_test)
+    predicted = closes_test * (1 + model.predict(X_test))
+    naive = closes_test
+    return {
+        "model_mae": float((predicted - actual).abs().mean()),
+        "naive_mae": float((naive - actual).abs().mean()),
+        "model_mape": float(((predicted - actual).abs() / actual).mean()),
+        "naive_mape": float(((naive - actual).abs() / actual).mean()),
+        "test_start": X_test.index[0],
+        "test_end": X_test.index[-1],
+    }
+
+
+def predict_price(model: RandomForestRegressor, latest_row: pd.DataFrame,
+                  last_close: float) -> float:
+    """Predicted price in HORIZON_DAYS trading days: today's close x (1 + predicted return)."""
+    return float(last_close * (1 + model.predict(latest_row)[-1]))
+
+
+def feature_importance(model) -> pd.Series:
     """How much each feature mattered to the model, largest first (sums to 1)."""
     importance = pd.Series(model.feature_importances_, index=model.feature_names_in_)
     importance = importance.rename(index=FEATURE_LABELS)

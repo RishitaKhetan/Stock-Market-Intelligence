@@ -7,10 +7,13 @@ import pytest
 from src.features import FEATURE_COLUMNS, FEATURE_LABELS
 from src.model import (
     evaluate,
+    evaluate_regression,
     feature_importance,
     predict_latest,
+    predict_price,
     time_split,
     train_model,
+    train_regressor,
 )
 
 
@@ -73,4 +76,51 @@ def test_feature_importance():
     assert set(importance.index) == set(FEATURE_LABELS.values())
     assert importance.is_monotonic_decreasing
     # The only feature that matters should come out on top.
+    assert importance.index[0] == FEATURE_LABELS["ret_5"]
+
+
+# --- Stage 1: price regression -------------------------------------------------
+
+def make_learnable_returns(n=800, seed=0):
+    """Random features where the future return is simple: 2% x ret_5."""
+    X, _ = make_learnable_data(n, seed)
+    y = 0.02 * X["ret_5"]
+    closes = pd.Series(100.0, index=X.index)
+    return X, y, closes
+
+
+def test_regressor_beats_naive_baseline():
+    X, y, closes = make_learnable_returns()
+    X_train, X_test, y_train, y_test = time_split(X, y, test_days=252)
+    result = evaluate_regression(train_regressor(X_train, y_train), X_test, y_test,
+                                 closes.loc[X_test.index])
+
+    assert result["model_mae"] < 0.5 * result["naive_mae"]
+    assert result["model_mape"] < result["naive_mape"]
+    assert result["test_start"] == X_test.index[0]
+    assert result["test_end"] == X_test.index[-1]
+
+
+def test_naive_baseline_mae_is_the_average_move():
+    X, y, closes = make_learnable_returns()
+    X_train, X_test, y_train, y_test = time_split(X, y, test_days=252)
+    result = evaluate_regression(train_regressor(X_train, y_train), X_test, y_test,
+                                 closes.loc[X_test.index])
+    # "No change" misses by exactly how far the price really moved.
+    assert result["naive_mae"] == pytest.approx((100 * y_test).abs().mean())
+
+
+def test_predict_price_applies_return_to_last_close():
+    X, y, _ = make_learnable_returns()
+    model = train_regressor(X, y)
+    latest = X.iloc[[-1]]
+
+    expected = 250.0 * (1 + model.predict(latest)[0])
+    assert predict_price(model, latest, 250.0) == pytest.approx(expected)
+
+
+def test_feature_importance_works_for_regressor():
+    X, y, _ = make_learnable_returns()
+    importance = feature_importance(train_regressor(X, y))
+    assert importance.sum() == pytest.approx(1.0)
     assert importance.index[0] == FEATURE_LABELS["ret_5"]
