@@ -12,22 +12,22 @@ import yfinance as yf
 from src.config import HISTORY_PERIOD, MAX_HEADLINES, NEWS_KEYWORDS, POPULAR_TICKERS
 
 # The only columns the rest of the project uses, in this order.
-PRICE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+PRICE_COLUMN_NAMES = ["Open", "High", "Low", "Close", "Volume"]
 
 # If Yahoo finds fewer headlines than this, top up from Google News.
-MIN_YAHOO_HEADLINES = 5
+MIN_YAHOO_HEADLINE_COUNT = 5
 
 # Google News also returns "live share price" pages. They aren't news, so skip
 # titles like "HDFC Bank Share Price Today" or "TCS (NSEI:TCS) Stock Price".
-QUOTE_PAGE = re.compile(r"\b(share|stock) price\b\s*(today|live|-|&|$)", re.IGNORECASE)
+QUOTE_PAGE_PATTERN = re.compile(r"\b(share|stock) price\b\s*(today|live|-|&|$)", re.IGNORECASE)
 
 
-def normalize_ticker(ticker: str) -> str:
+def normalize_ticker_symbol(ticker: str) -> str:
     """Clean up what the user typed: ' tcs.ns ' -> 'TCS.NS'."""
     return ticker.strip().upper()
 
 
-def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+def flatten_price_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Turn yfinance's two-level column headers into plain names.
 
     Recent yfinance versions return columns like ("Close", "AAPL") even when
@@ -41,26 +41,26 @@ def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
             if "Close" in df.columns.get_level_values(level):
                 df.columns = df.columns.get_level_values(level)
                 break
-    df = df[PRICE_COLUMNS]
+    df = df[PRICE_COLUMN_NAMES]
     df.columns.name = None  # drop the leftover "Price" header label
     return df
 
 
-def load_prices(ticker: str, period: str = HISTORY_PERIOD) -> pd.DataFrame:
+def load_price_history(ticker: str, period: str = HISTORY_PERIOD) -> pd.DataFrame:
     """Download daily prices for one ticker.
 
     Returns a DataFrame indexed by date (oldest first) with columns
     Open, High, Low, Close, Volume. Raises ValueError if nothing comes back.
     """
-    ticker = normalize_ticker(ticker)
+    ticker = normalize_ticker_symbol(ticker)
     if not ticker:
         raise ValueError("Please enter a ticker symbol.")
 
-    raw = yf.download(ticker, period=period, auto_adjust=True, progress=False)
-    if raw is None or raw.empty:
+    raw_download = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+    if raw_download is None or raw_download.empty:
         raise ValueError(f"No price data found for {ticker}")
 
-    df = flatten_columns(raw)
+    df = flatten_price_columns(raw_download)
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
     df = df.dropna(subset=["Close"])
@@ -80,7 +80,7 @@ def load_prices(ticker: str, period: str = HISTORY_PERIOD) -> pd.DataFrame:
 # Every headline becomes a dict: title, publisher, link, published.
 
 
-def parse_news_item(item: dict):
+def parse_yahoo_news_item(item: dict):
     """Turn one Yahoo news item into our standard dict, or None if it has no title.
 
     Yahoo has used two formats over the years:
@@ -98,8 +98,8 @@ def parse_news_item(item: dict):
         title = item.get("title")
         publisher = item.get("publisher")
         link = item.get("link")
-        seconds = item.get("providerPublishTime")
-        published = pd.to_datetime(seconds, unit="s", utc=True) if seconds else pd.NaT
+        publish_seconds = item.get("providerPublishTime")
+        published = pd.to_datetime(publish_seconds, unit="s", utc=True) if publish_seconds else pd.NaT
 
     if not title or not str(title).strip():
         return None
@@ -111,20 +111,20 @@ def parse_news_item(item: dict):
     }
 
 
-def is_about_ticker(item: dict, ticker: str) -> bool:
+def is_tagged_with_ticker(item: dict, ticker: str) -> bool:
     """True if Yahoo tagged this headline with our stock.
 
     Accepts the exact symbol, or the same company on another Indian exchange
     (TCS.NS also matches TCS.BO), but not an unrelated US "TCS".
     """
-    base = ticker.split(".")[0]
-    for related in item.get("relatedTickers") or []:
-        if related == ticker or ("." in related and related.split(".")[0] == base):
+    base_symbol = ticker.split(".")[0]
+    for related_symbol in item.get("relatedTickers") or []:
+        if related_symbol == ticker or ("." in related_symbol and related_symbol.split(".")[0] == base_symbol):
             return True
     return False
 
 
-def parse_google_rss(xml_text: str) -> list[dict]:
+def parse_google_news_rss(xml_text: str) -> list[dict]:
     """Read a Google News RSS feed into our standard dicts."""
     headlines = []
     for item in ET.fromstring(xml_text).findall("./channel/item"):
@@ -133,7 +133,7 @@ def parse_google_rss(xml_text: str) -> list[dict]:
         # Google adds " - Publisher" to the end of every title; remove it.
         if publisher and title.endswith(f" - {publisher}"):
             title = title[: -len(f" - {publisher}")].strip()
-        if not title or QUOTE_PAGE.search(title):
+        if not title or QUOTE_PAGE_PATTERN.search(title):
             continue
         try:
             published = pd.Timestamp(parsedate_to_datetime(item.findtext("pubDate")))
@@ -148,91 +148,93 @@ def parse_google_rss(xml_text: str) -> list[dict]:
     return headlines
 
 
-def fetch_yahoo_items(query: str) -> list[dict]:
+def fetch_yahoo_news_items(query: str) -> list[dict]:
     """Raw news items from Yahoo Finance search (network call)."""
     return yf.Search(query, news_count=25, max_results=1).news
 
 
-def fetch_google_rss(query: str, india: bool) -> str:
+def fetch_google_news_rss(query: str, is_indian_stock: bool) -> str:
     """Raw Google News RSS text for a search query (network call)."""
-    region = {"hl": "en-IN", "gl": "IN", "ceid": "IN:en"} if india else \
-             {"hl": "en-US", "gl": "US", "ceid": "US:en"}
-    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": query, **region})
+    region_params = {"hl": "en-IN", "gl": "IN", "ceid": "IN:en"} if is_indian_stock else \
+                    {"hl": "en-US", "gl": "US", "ceid": "US:en"}
+    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": query, **region_params})
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=10) as response:
         return response.read().decode("utf-8")
 
 
-def get_company_name(ticker: str) -> str:
+def lookup_company_name(ticker: str) -> str:
     """A company name for searching Google News (falls back to the symbol)."""
     if ticker in POPULAR_TICKERS:
         return POPULAR_TICKERS[ticker]
     try:
-        info = yf.Ticker(ticker).info
-        return info.get("shortName") or info.get("longName") or ticker.split(".")[0]
+        ticker_info = yf.Ticker(ticker).info
+        return ticker_info.get("shortName") or ticker_info.get("longName") or ticker.split(".")[0]
     except Exception:
         return ticker.split(".")[0]
 
 
-def news_keywords(ticker: str, company_name: str) -> list[str]:
+def build_news_keywords(ticker: str, company_name: str) -> list[str]:
     """Words a headline must contain to count as being about this stock."""
-    base = ticker.split(".")[0]
-    names = NEWS_KEYWORDS.get(ticker) or [company_name.split()[0]]
-    return [base] + names
+    base_symbol = ticker.split(".")[0]
+    company_names = NEWS_KEYWORDS.get(ticker) or [company_name.split()[0]]
+    return [base_symbol] + company_names
 
 
-def mentions_company(title: str, keywords: list[str]) -> bool:
+def title_mentions_company(title: str, keywords: list[str]) -> bool:
     """True if the title contains any keyword as a whole word ("TCS", not "TCSx")."""
-    return any(re.search(rf"(?<!\w){re.escape(k)}(?!\w)", title, re.IGNORECASE)
-               for k in keywords)
+    return any(re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", title, re.IGNORECASE)
+               for keyword in keywords)
 
 
-def yahoo_news(ticker: str) -> list[dict]:
+def fetch_yahoo_headlines(ticker: str) -> list[dict]:
     """Headlines Yahoo tags with this stock. [] on any error."""
     try:
-        items = fetch_yahoo_items(ticker.split(".")[0])  # "TCS.NS" finds nothing; "TCS" works
+        raw_items = fetch_yahoo_news_items(ticker.split(".")[0])  # "TCS.NS" finds nothing; "TCS" works
     except Exception:
         return []
-    parsed = [parse_news_item(item) for item in items if is_about_ticker(item, ticker)]
-    return [p for p in parsed if p]
+    parsed_items = [parse_yahoo_news_item(item) for item in raw_items if is_tagged_with_ticker(item, ticker)]
+    return [p for p in parsed_items if p]
 
 
-def google_news(company_name: str, ticker: str) -> list[dict]:
+def fetch_google_headlines(company_name: str, ticker: str) -> list[dict]:
     """Last week's Google News headlines about the company. [] on any error."""
-    india = ticker.endswith((".NS", ".BO"))
+    is_indian_stock = ticker.endswith((".NS", ".BO"))
     try:
-        return parse_google_rss(fetch_google_rss(f'"{company_name}" stock when:7d', india))
+        return parse_google_news_rss(fetch_google_news_rss(f'"{company_name}" stock when:7d', is_indian_stock))
     except Exception:
         return []
 
 
-def load_news(ticker: str, company_name: str | None = None) -> list[dict]:
+def load_news_headlines(ticker: str, company_name: str | None = None) -> list[dict]:
     """Up to MAX_HEADLINES recent headlines about a stock, newest first.
 
     Each item is a dict with keys title, publisher, link, published.
     Returns [] if nothing can be found (never raises).
     """
     try:
-        ticker = normalize_ticker(ticker)
-        company_name = company_name or get_company_name(ticker)
-        keywords = news_keywords(ticker, company_name)
+        ticker = normalize_ticker_symbol(ticker)
+        company_name = company_name or lookup_company_name(ticker)
+        keywords = build_news_keywords(ticker, company_name)
 
-        def relevant(items):
+        def keep_relevant_headlines(candidate_headlines):
             # Drop market-wide stories that only mention our stock in passing.
-            return [h for h in items if mentions_company(h["title"], keywords)]
+            return [headline for headline in candidate_headlines
+                    if title_mentions_company(headline["title"], keywords)]
 
-        headlines = relevant(yahoo_news(ticker))
-        if len(headlines) < MIN_YAHOO_HEADLINES:
-            headlines += relevant(google_news(company_name, ticker))
+        headlines = keep_relevant_headlines(fetch_yahoo_headlines(ticker))
+        if len(headlines) < MIN_YAHOO_HEADLINE_COUNT:
+            headlines += keep_relevant_headlines(fetch_google_headlines(company_name, ticker))
 
         # Drop repeats (same story from both sources), then newest first.
-        unique = {}
-        for h in headlines:
-            unique.setdefault(h["title"].lower(), h)
-        oldest = pd.Timestamp.min.tz_localize("UTC")
-        ordered = sorted(unique.values(),
-                         key=lambda h: h["published"] if pd.notna(h["published"]) else oldest,
-                         reverse=True)
-        return ordered[:MAX_HEADLINES]
+        unique_by_title = {}
+        for headline in headlines:
+            unique_by_title.setdefault(headline["title"].lower(), headline)
+        oldest_possible_time = pd.Timestamp.min.tz_localize("UTC")
+        newest_first = sorted(unique_by_title.values(),
+                              key=lambda headline: headline["published"]
+                              if pd.notna(headline["published"]) else oldest_possible_time,
+                              reverse=True)
+        return newest_first[:MAX_HEADLINES]
     except Exception:
         return []

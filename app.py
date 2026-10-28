@@ -9,7 +9,7 @@ import streamlit as st
 
 from src.backtest import run_backtest
 from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
-from src.data import load_news, load_prices, normalize_ticker
+from src.data import load_news_headlines, load_price_history, normalize_ticker_symbol
 from src.features import add_moving_averages, make_dataset
 from src.model import (
     evaluate,
@@ -19,7 +19,7 @@ from src.model import (
     time_split,
     train_model,
 )
-from src.sentiment import load_analyzer, mood_summary, score_headlines
+from src.sentiment import load_sentiment_analyzer, summarize_news_mood, score_headline_sentiment
 
 st.set_page_config(page_title="Stock Market Intelligence", layout="wide")
 
@@ -35,7 +35,7 @@ EXAMPLE_TICKERS = ["AAPL", "NVDA", "RELIANCE.NS"]
 
 @st.cache_data(ttl=3600, show_spinner="Downloading prices...")
 def get_prices(ticker: str):
-    return load_prices(ticker)
+    return load_price_history(ticker)
 
 
 @st.cache_data(ttl=3600, show_spinner="Training the model...")
@@ -63,15 +63,15 @@ def run_model(ticker: str) -> dict:
 @st.cache_resource(show_spinner="Loading FinBERT (first run downloads about 400 MB)...")
 def get_analyzer():
     """Load the sentiment model once and share it across all users and reruns."""
-    return load_analyzer()
+    return load_sentiment_analyzer()
 
 
 @st.cache_data(ttl=1800, show_spinner="Reading the news with FinBERT...")
 def get_news_mood(ticker: str):
     """Fetch headlines and score them. Returns (news, scores, engine name)."""
-    news = load_news(ticker)
+    news = load_news_headlines(ticker)
     analyzer, engine = get_analyzer()
-    scores = score_headlines([n["title"] for n in news], analyzer)
+    scores = score_headline_sentiment([n["title"] for n in news], analyzer)
     return news, scores, engine
 
 
@@ -109,7 +109,7 @@ ticker = st.selectbox(
     help="Pick a stock, or type any Yahoo Finance symbol (Indian NSE stocks end in .NS).",
 )
 if st.button("Analyze", type="primary"):
-    st.session_state.analyzed = normalize_ticker(ticker or "")  # None if box cleared
+    st.session_state.analyzed = normalize_ticker_symbol(ticker or "")  # None if box cleared
 
 if st.session_state.analyzed is not None:
     ticker = st.session_state.analyzed
@@ -195,7 +195,7 @@ if st.session_state.analyzed is not None:
     if not news:
         st.info("No recent news found for this stock.")
     else:
-        summary = mood_summary(scores)
+        summary = summarize_news_mood(scores)
         col1, col2 = st.columns([1, 3])
         col1.metric("Mood score (-1 to +1)", f"{summary['mean_score']:+.2f}",
                     delta=summary["mood"], delta_color=MOOD_DELTA_COLOR[summary["mood"]],

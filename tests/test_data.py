@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from src import config
-from src.data import PRICE_COLUMNS, flatten_columns, load_prices, normalize_ticker
+from src.data import PRICE_COLUMN_NAMES, flatten_price_columns, load_price_history, normalize_ticker_symbol
 
 
 def test_config_values():
@@ -13,7 +13,7 @@ def test_config_values():
 
 
 def test_normalize_ticker():
-    assert normalize_ticker("  tcs.ns ") == "TCS.NS"
+    assert normalize_ticker_symbol("  tcs.ns ") == "TCS.NS"
 
 
 def test_flatten_columns_multiindex():
@@ -27,9 +27,9 @@ def test_flatten_columns_multiindex():
     )
     raw = pd.DataFrame(np.arange(15).reshape(3, 5), index=dates, columns=columns)
 
-    flat = flatten_columns(raw)
+    flat = flatten_price_columns(raw)
 
-    assert list(flat.columns) == PRICE_COLUMNS
+    assert list(flat.columns) == PRICE_COLUMN_NAMES
     # The values must stay attached to the right column.
     assert list(flat["Close"]) == [0, 5, 10]
     assert list(flat["Volume"]) == [4, 9, 14]
@@ -38,25 +38,25 @@ def test_flatten_columns_multiindex():
 def test_flatten_columns_ticker_first():
     # Some versions put the ticker on the first level instead.
     dates = pd.date_range("2024-01-01", periods=2)
-    columns = pd.MultiIndex.from_product([["AAPL"], PRICE_COLUMNS])
+    columns = pd.MultiIndex.from_product([["AAPL"], PRICE_COLUMN_NAMES])
     raw = pd.DataFrame(np.ones((2, 5)), index=dates, columns=columns)
 
-    assert list(flatten_columns(raw).columns) == PRICE_COLUMNS
+    assert list(flatten_price_columns(raw).columns) == PRICE_COLUMN_NAMES
 
 
 def test_flatten_columns_already_flat():
     dates = pd.date_range("2024-01-01", periods=2)
     raw = pd.DataFrame(np.ones((2, 6)), index=dates,
-                       columns=PRICE_COLUMNS + ["Dividends"])
+                       columns=PRICE_COLUMN_NAMES + ["Dividends"])
 
-    assert list(flatten_columns(raw).columns) == PRICE_COLUMNS
+    assert list(flatten_price_columns(raw).columns) == PRICE_COLUMN_NAMES
 
 
 @pytest.mark.network
 def test_load_prices_real_ticker():
-    df = load_prices("AAPL")
+    df = load_price_history("AAPL")
     assert len(df) > 1000
-    assert list(df.columns) == PRICE_COLUMNS
+    assert list(df.columns) == PRICE_COLUMN_NAMES
     assert df.index.is_monotonic_increasing
     assert df["Close"].notna().all()
 
@@ -64,7 +64,7 @@ def test_load_prices_real_ticker():
 @pytest.mark.network
 def test_load_prices_fake_ticker():
     with pytest.raises(ValueError):
-        load_prices("NOTAREALTICKER123")
+        load_price_history("NOTAREALTICKER123")
 
 
 @pytest.mark.network
@@ -73,7 +73,7 @@ def test_all_dropdown_tickers_load():
     failed = []
     for ticker in config.POPULAR_TICKERS:
         try:
-            load_prices(ticker, period="1mo")
+            load_price_history(ticker, period="1mo")
         except ValueError:
             failed.append(ticker)
     assert failed == []
@@ -82,7 +82,7 @@ def test_all_dropdown_tickers_load():
 # --- News --------------------------------------------------------------------
 
 import src.data as data_module
-from src.data import is_about_ticker, load_news, parse_google_rss, parse_news_item
+from src.data import is_tagged_with_ticker, load_news_headlines, parse_google_news_rss, parse_yahoo_news_item
 
 NEW_FORMAT_ITEM = {
     "id": "abc",
@@ -126,7 +126,7 @@ GOOGLE_RSS = """<?xml version="1.0"?>
 
 
 def test_parse_news_new_format():
-    item = parse_news_item(NEW_FORMAT_ITEM)
+    item = parse_yahoo_news_item(NEW_FORMAT_ITEM)
     assert item["title"] == "Apple unveils new iPad"
     assert item["publisher"] == "Reuters"
     assert item["link"] == "https://example.com/ipad"
@@ -134,7 +134,7 @@ def test_parse_news_new_format():
 
 
 def test_parse_news_old_format():
-    item = parse_news_item(OLD_FORMAT_ITEM)
+    item = parse_yahoo_news_item(OLD_FORMAT_ITEM)
     assert item["title"] == "Apple shares rise"
     assert item["publisher"] == "CNBC"
     assert item["link"] == "https://example.com/rise"
@@ -142,22 +142,22 @@ def test_parse_news_old_format():
 
 
 def test_parse_news_skips_items_without_title():
-    assert parse_news_item({"publisher": "CNBC"}) is None
-    assert parse_news_item({"content": {"title": "  "}}) is None
+    assert parse_yahoo_news_item({"publisher": "CNBC"}) is None
+    assert parse_yahoo_news_item({"content": {"title": "  "}}) is None
 
 
 def test_is_about_ticker():
-    assert is_about_ticker({"relatedTickers": ["GOOG", "AAPL"]}, "AAPL")
-    assert not is_about_ticker({"relatedTickers": ["GOOG"]}, "AAPL")
-    assert not is_about_ticker({}, "AAPL")
+    assert is_tagged_with_ticker({"relatedTickers": ["GOOG", "AAPL"]}, "AAPL")
+    assert not is_tagged_with_ticker({"relatedTickers": ["GOOG"]}, "AAPL")
+    assert not is_tagged_with_ticker({}, "AAPL")
     # Same company on the other Indian exchange counts...
-    assert is_about_ticker({"relatedTickers": ["TCS.BO"]}, "TCS.NS")
+    assert is_tagged_with_ticker({"relatedTickers": ["TCS.BO"]}, "TCS.NS")
     # ...but a US company that happens to use the same letters does not.
-    assert not is_about_ticker({"relatedTickers": ["TCS"]}, "TCS.NS")
+    assert not is_tagged_with_ticker({"relatedTickers": ["TCS"]}, "TCS.NS")
 
 
 def test_parse_google_rss_strips_publisher_and_skips_quote_pages():
-    items = parse_google_rss(GOOGLE_RSS)
+    items = parse_google_news_rss(GOOGLE_RSS)
     assert [i["title"] for i in items] == ["TCS share price surges 28% in October"]
     assert items[0]["publisher"] == "Business Standard"
     assert items[0]["published"] == pd.Timestamp("2026-10-23 07:00", tz="UTC")
@@ -171,12 +171,12 @@ def fake_yahoo(n):
 
 
 def test_load_news_uses_yahoo_when_enough(monkeypatch):
-    monkeypatch.setattr(data_module, "fetch_yahoo_items", lambda q: fake_yahoo(20))
+    monkeypatch.setattr(data_module, "fetch_yahoo_news_items", lambda q: fake_yahoo(20))
     called = []
-    monkeypatch.setattr(data_module, "fetch_google_rss",
+    monkeypatch.setattr(data_module, "fetch_google_news_rss",
                         lambda q, india: called.append(q) or GOOGLE_RSS)
 
-    news = load_news("AAPL", company_name="Apple")
+    news = load_news_headlines("AAPL", company_name="Apple")
     assert len(news) == config.MAX_HEADLINES
     assert "Unrelated" not in [n["title"] for n in news]
     assert news[0]["title"] == "Apple story 19"  # newest first
@@ -184,14 +184,14 @@ def test_load_news_uses_yahoo_when_enough(monkeypatch):
 
 
 def test_load_news_falls_back_to_google(monkeypatch):
-    monkeypatch.setattr(data_module, "fetch_yahoo_items", lambda q: fake_yahoo(0))
+    monkeypatch.setattr(data_module, "fetch_yahoo_news_items", lambda q: fake_yahoo(0))
     seen = {}
     def fake_google(query, india):
         seen.update(query=query, india=india)
         return GOOGLE_RSS
-    monkeypatch.setattr(data_module, "fetch_google_rss", fake_google)
+    monkeypatch.setattr(data_module, "fetch_google_news_rss", fake_google)
 
-    news = load_news("tcs.ns", company_name="Tata Consultancy Services")
+    news = load_news_headlines("tcs.ns", company_name="Tata Consultancy Services")
     assert [n["title"] for n in news] == ["TCS share price surges 28% in October"]
     assert "Tata Consultancy Services" in seen["query"] and seen["india"] is True
 
@@ -199,38 +199,38 @@ def test_load_news_falls_back_to_google(monkeypatch):
 def test_load_news_returns_empty_list_on_errors(monkeypatch):
     def boom(*args):
         raise ConnectionError("no internet")
-    monkeypatch.setattr(data_module, "fetch_yahoo_items", boom)
-    monkeypatch.setattr(data_module, "fetch_google_rss", boom)
-    assert load_news("AAPL", company_name="Apple") == []
+    monkeypatch.setattr(data_module, "fetch_yahoo_news_items", boom)
+    monkeypatch.setattr(data_module, "fetch_google_news_rss", boom)
+    assert load_news_headlines("AAPL", company_name="Apple") == []
 
 
 @pytest.mark.network
 @pytest.mark.parametrize("ticker", ["AAPL", "RELIANCE.NS"])
 def test_load_news_real(ticker):
-    news = load_news(ticker)
+    news = load_news_headlines(ticker)
     assert 0 < len(news) <= config.MAX_HEADLINES
     assert set(news[0]) == {"title", "publisher", "link", "published"}
 
 
 def test_mentions_company():
-    from src.data import mentions_company, news_keywords
+    from src.data import title_mentions_company, build_news_keywords
 
-    apple = news_keywords("AAPL", "Apple")
-    assert mentions_company("Apple unveils new iPad", apple)
-    assert mentions_company("Why AAPL stock fell today", apple)
-    assert not mentions_company("Tesla leaves the Magnificent 7 in the dust", apple)
-    assert not mentions_company("Pineapple prices rise", apple)  # whole words only
+    apple = build_news_keywords("AAPL", "Apple")
+    assert title_mentions_company("Apple unveils new iPad", apple)
+    assert title_mentions_company("Why AAPL stock fell today", apple)
+    assert not title_mentions_company("Tesla leaves the Magnificent 7 in the dust", apple)
+    assert not title_mentions_company("Pineapple prices rise", apple)  # whole words only
 
-    sbi = news_keywords("SBIN.NS", "State Bank of India")  # uses NEWS_KEYWORDS aliases
-    assert mentions_company("SBI shares hit record high", sbi)
-    assert not mentions_company("ICICI Bank share price prediction", sbi)
+    sbi = build_news_keywords("SBIN.NS", "State Bank of India")  # uses NEWS_KEYWORDS aliases
+    assert title_mentions_company("SBI shares hit record high", sbi)
+    assert not title_mentions_company("ICICI Bank share price prediction", sbi)
 
 
 def test_load_news_drops_headlines_not_about_the_company(monkeypatch):
     items = fake_yahoo(10) + [dict(OLD_FORMAT_ITEM, title="Silver is down 17% in a month")]
-    monkeypatch.setattr(data_module, "fetch_yahoo_items", lambda q: items)
-    monkeypatch.setattr(data_module, "fetch_google_rss", lambda q, india: GOOGLE_RSS)
+    monkeypatch.setattr(data_module, "fetch_yahoo_news_items", lambda q: items)
+    monkeypatch.setattr(data_module, "fetch_google_news_rss", lambda q, india: GOOGLE_RSS)
 
-    titles = [n["title"] for n in load_news("AAPL", company_name="Apple")]
+    titles = [n["title"] for n in load_news_headlines("AAPL", company_name="Apple")]
     assert "Silver is down 17% in a month" not in titles
     assert len(titles) == 10
