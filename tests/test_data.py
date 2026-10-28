@@ -234,3 +234,61 @@ def test_load_news_drops_headlines_not_about_the_company(monkeypatch):
     titles = [n["title"] for n in load_news_headlines("AAPL", company_name="Apple")]
     assert "Silver is down 17% in a month" not in titles
     assert len(titles) == 10
+
+
+# --- News history ---------------------------------------------------------------
+
+def fake_score_titles(titles):
+    return pd.DataFrame({"title": titles, "positive": 0.7, "negative": 0.1, "neutral": 0.2,
+                         "score": 0.6, "label": "positive"})
+
+
+def one_headline_rss(title, day):
+    return f"""<rss><channel><item><title>{title} - Reuters</title><link>https://x.com/{day}</link>
+    <pubDate>{pd.Timestamp(day):%a, %d %b %Y} 12:00:00 GMT</pubDate><source>Reuters</source></item>
+    </channel></rss>"""
+
+
+def test_load_news_history_builds_dated_queries_and_caches(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_module, "NEWS_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(data_module, "SECONDS_BETWEEN_REQUESTS", 0)
+    queries = []
+
+    def fake_google(query, india):
+        queries.append(query)
+        after = query.split("after:")[1][:10]
+        return one_headline_rss(f"Apple news {after}", after)
+    monkeypatch.setattr(data_module, "fetch_google_news_rss", fake_google)
+
+    history = data_module.load_news_history("AAPL", fake_score_titles, days=28, company_name="Apple")
+
+    assert len(queries) == 4
+    assert all("after:" in q and "before:" in q and '"Apple"' in q for q in queries)
+    after, before = queries[0].split("after:")[1].split(" before:")
+    assert pd.Timestamp(before) - pd.Timestamp(after) == pd.Timedelta(days=7)
+    assert len(history) == 4 and (history["score"] == 0.6).all()
+    assert history["published"].is_monotonic_increasing
+    assert (tmp_path / "AAPL.csv").exists()
+
+    # Second run: only the newest (still filling) week is fetched again.
+    queries.clear()
+    again = data_module.load_news_history("AAPL", fake_score_titles, days=28, company_name="Apple")
+    assert len(queries) == 1
+    assert again["title"].tolist() == history["title"].tolist()
+    assert again["published"].equals(history["published"])
+
+
+def test_load_news_history_skips_failed_weeks_and_off_topic(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_module, "NEWS_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(data_module, "SECONDS_BETWEEN_REQUESTS", 0)
+    calls = []
+
+    def flaky_google(query, india):
+        calls.append(query)
+        if len(calls) == 1:
+            raise ConnectionError("blocked")
+        return one_headline_rss("Silver is down 17%", "2026-01-05")
+    monkeypatch.setattr(data_module, "fetch_google_news_rss", flaky_google)
+
+    history = data_module.load_news_history("AAPL", fake_score_titles, days=21, company_name="Apple")
+    assert len(calls) == 3 and history.empty

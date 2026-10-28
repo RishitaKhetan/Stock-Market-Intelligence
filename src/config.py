@@ -10,6 +10,10 @@ RSI_WINDOW = 14
 RANDOM_STATE = 42
 FINBERT_MODEL = "ProsusAI/finbert"
 MAX_HEADLINES = 15
+NEWS_HISTORY_DAYS = 730     # ~2 years of dated news for training stage 2
+SENTIMENT_WINDOW_DAYS = 7   # each day's news mood uses the last 7 calendar days
+STAGE2_TEST_DAYS = 126      # last ~6 months of stage 2 held out for testing
+NEWS_CACHE_DIR = "news_cache"  # scored headlines saved here, one CSV per ticker
 
 # Suggestions for the ticker dropdown (symbol -> company name).
 # Any other Yahoo Finance symbol can still be typed in by the user.

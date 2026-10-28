@@ -11,7 +11,7 @@ That is FinBERT's output format; the VADER fallback copies it.
 
 import pandas as pd
 
-from src.config import FINBERT_MODEL
+from src.config import FINBERT_MODEL, SENTIMENT_WINDOW_DAYS
 
 SENTIMENT_LABELS = ["positive", "negative", "neutral"]
 SCORED_HEADLINE_COLUMNS = ["title", "positive", "negative", "neutral", "score", "label"]
@@ -89,3 +89,39 @@ def summarize_news_mood(df: pd.DataFrame) -> dict:
         mood = "neutral"
     counts = {label: int((df["label"] == label).sum()) for label in SENTIMENT_LABELS}
     return {"mean_score": mean_score, "counts": counts, "mood": mood}
+
+
+SENTIMENT_FEATURE_COLUMNS = ["news_mean", "news_count", "news_positive_share", "news_negative_share"]
+
+
+def daily_sentiment_features(scored_news: pd.DataFrame, trading_days: pd.DatetimeIndex,
+                             window: int = SENTIMENT_WINDOW_DAYS) -> pd.DataFrame:
+    """News mood on each trading day, from headlines of the last `window` calendar days.
+
+    Day t uses only headlines dated t or earlier (no peeking at tomorrow's news).
+    Days with no headlines get zeros. scored_news needs published, score, label.
+    """
+    news_day = pd.to_datetime(scored_news["published"], utc=True).dt.tz_localize(None).dt.normalize()
+    daily = pd.DataFrame({
+        "total": scored_news["score"].astype(float).values,
+        "count": 1.0,
+        "positive": (scored_news["label"] == "positive").astype(float).values,
+        "negative": (scored_news["label"] == "negative").astype(float).values,
+    }, index=news_day.values).groupby(level=0).sum()
+
+    # Every calendar day, so the rolling window counts calendar days.
+    all_days = pd.date_range(min(daily.index.min(), trading_days.min()) if len(daily) else trading_days.min(),
+                             trading_days.max())
+    rolled = daily.reindex(all_days, fill_value=0.0).rolling(window, min_periods=1).sum()
+    rolled = rolled.reindex(trading_days.normalize()).fillna(0.0)
+
+    count = rolled["count"]
+    has_news = count > 0
+    features = pd.DataFrame({
+        "news_mean": (rolled["total"] / count).where(has_news, 0.0),
+        "news_count": count,
+        "news_positive_share": (rolled["positive"] / count).where(has_news, 0.0),
+        "news_negative_share": (rolled["negative"] / count).where(has_news, 0.0),
+    })
+    features.index = trading_days
+    return features[SENTIMENT_FEATURE_COLUMNS]

@@ -94,3 +94,47 @@ def test_vader_score_equals_compound():
     compounds = [SentimentIntensityAnalyzer().polarity_scores(t)["compound"] for t in titles]
     assert df["score"].tolist() == pytest.approx(compounds)
     assert df.loc[1, "label"] == "neutral"
+
+
+# --- Daily sentiment features ------------------------------------------------------
+
+from src.sentiment import SENTIMENT_FEATURE_COLUMNS, daily_sentiment_features
+
+
+def dated_news(rows):
+    """rows: (date, score, label)"""
+    return pd.DataFrame({"published": pd.to_datetime([r[0] for r in rows], utc=True),
+                         "score": [r[1] for r in rows], "label": [r[2] for r in rows]})
+
+
+def test_daily_sentiment_window_and_zeros():
+    days = pd.bdate_range("2026-01-05", "2026-01-23")
+    news = dated_news([("2026-01-06 15:00", 0.8, "positive"),
+                       ("2026-01-07 09:00", -0.4, "negative")])
+    f = daily_sentiment_features(news, days, window=7)
+
+    assert list(f.columns) == SENTIMENT_FEATURE_COLUMNS and f.index.equals(days)
+    assert f.loc["2026-01-05"].tolist() == [0, 0, 0, 0]             # before any news
+    assert f.loc["2026-01-06", "news_count"] == 1
+    assert f.loc["2026-01-08", "news_mean"] == pytest.approx(0.2)
+    assert f.loc["2026-01-08", "news_positive_share"] == 0.5
+    assert f.loc["2026-01-12", "news_count"] == 2                   # Jan 6 still in the 7 days
+    assert f.loc["2026-01-13", "news_count"] == 1                   # Jan 6 dropped out
+    assert f.loc["2026-01-23"].tolist() == [0, 0, 0, 0]             # news too old
+
+
+def test_daily_sentiment_no_look_ahead():
+    days = pd.bdate_range("2026-01-05", "2026-01-16")
+    news = dated_news([("2026-01-06", 0.5, "positive")])
+    tomorrow = dated_news([("2026-01-06", 0.5, "positive"), ("2026-01-09", -0.9, "negative")])
+    before = daily_sentiment_features(news, days)
+    after = daily_sentiment_features(tomorrow, days)
+    # A headline dated Jan 9 must not change any day before Jan 9.
+    assert before.loc[:"2026-01-08"].equals(after.loc[:"2026-01-08"])
+    assert not before.loc["2026-01-09"].equals(after.loc["2026-01-09"])
+
+
+def test_daily_sentiment_with_no_news_at_all():
+    days = pd.bdate_range("2026-01-05", periods=5)
+    f = daily_sentiment_features(dated_news([]), days)
+    assert (f == 0).all().all() and len(f) == 5

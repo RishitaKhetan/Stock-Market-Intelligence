@@ -1,6 +1,8 @@
 """Downloading data: daily stock prices and recent news headlines."""
 
 import re
+import time
+from pathlib import Path
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -9,7 +11,8 @@ from email.utils import parsedate_to_datetime
 import pandas as pd
 import yfinance as yf
 
-from src.config import HISTORY_PERIOD, MAX_HEADLINES, NEWS_KEYWORDS, POPULAR_TICKERS
+from src.config import (HISTORY_PERIOD, MAX_HEADLINES, NEWS_CACHE_DIR, NEWS_HISTORY_DAYS, NEWS_KEYWORDS,
+                        POPULAR_TICKERS)
 
 # The only columns the rest of the project uses, in this order.
 PRICE_COLUMN_NAMES = ["Open", "High", "Low", "Close", "Volume"]
@@ -238,3 +241,76 @@ def load_news_headlines(ticker: str, company_name: str | None = None) -> list[di
         return newest_first[:MAX_HEADLINES]
     except Exception:
         return []
+
+
+# --- News history (for training stage 2) ---------------------------------------
+#
+# Google News search accepts "after:YYYY-MM-DD before:YYYY-MM-DD", so we ask for
+# one week at a time going back NEWS_HISTORY_DAYS. Headlines are scored once and
+# saved to news_cache/<TICKER>.csv; later runs only fetch weeks not saved yet.
+
+NEWS_HISTORY_COLUMNS = ["week", "title", "publisher", "link", "published",
+                        "positive", "negative", "neutral", "score", "label"]
+SECONDS_BETWEEN_REQUESTS = 1.0  # be polite to Google
+
+
+def news_cache_path(ticker: str) -> Path:
+    return Path(NEWS_CACHE_DIR) / f"{ticker.replace('/', '_')}.csv"
+
+
+def fetch_google_week(company_name: str, ticker: str, week_start: pd.Timestamp) -> list[dict]:
+    """Google News headlines about the company published in one week (network call)."""
+    week_end = week_start + pd.Timedelta(days=7)
+    query = f'"{company_name}" stock after:{week_start:%Y-%m-%d} before:{week_end:%Y-%m-%d}'
+    return parse_google_news_rss(fetch_google_news_rss(query, ticker.endswith((".NS", ".BO"))))
+
+
+def load_news_history(ticker: str, score_titles, days: int = NEWS_HISTORY_DAYS,
+                      company_name: str | None = None) -> pd.DataFrame:
+    """About `days` days of scored headlines about a stock, oldest first.
+
+    score_titles: function(list of titles) -> DataFrame with positive, negative,
+    neutral, score, label (e.g. sentiment.score_headline_sentiment with an analyzer).
+    Weeks that fail to download are skipped and retried on the next run.
+    """
+    ticker = normalize_ticker_symbol(ticker)
+    company_name = company_name or lookup_company_name(ticker)
+    keywords = build_news_keywords(ticker, company_name)
+    path = news_cache_path(ticker)
+
+    cached = pd.read_csv(path, parse_dates=["week"]) if path.exists() else \
+        pd.DataFrame(columns=NEWS_HISTORY_COLUMNS)
+    cached["published"] = pd.to_datetime(cached["published"], utc=True, format="ISO8601")
+
+    today = pd.Timestamp.now().normalize()
+    weeks = pd.date_range(end=today, periods=days // 7, freq="W-MON")
+    # The newest week is still filling up, so always fetch it again.
+    # ponytail: weeks with no headlines leave no row, so they are re-fetched every run.
+    cached = cached[cached["week"] != weeks[-1]]
+    done = set(cached["week"])
+
+    new_rows = []
+    for week_start in weeks:
+        if week_start in done:
+            continue
+        try:
+            headlines = fetch_google_week(company_name, ticker, week_start)
+        except Exception:
+            continue
+        for headline in headlines:
+            if title_mentions_company(headline["title"], keywords):
+                new_rows.append({"week": week_start, **headline})
+        time.sleep(SECONDS_BETWEEN_REQUESTS)
+
+    if new_rows:
+        new = pd.DataFrame(new_rows).drop_duplicates("title")
+        new["published"] = pd.to_datetime(new["published"], utc=True)
+        scores = score_titles(new["title"].tolist())
+        new = pd.concat([new.reset_index(drop=True),
+                         scores.drop(columns="title").reset_index(drop=True)], axis=1)
+        cached = pd.concat([cached, new[NEWS_HISTORY_COLUMNS]], ignore_index=True)
+
+    history = cached.drop_duplicates("title").sort_values("published", ignore_index=True)
+    path.parent.mkdir(exist_ok=True)
+    history.to_csv(path, index=False)
+    return history
