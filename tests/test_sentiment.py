@@ -3,7 +3,8 @@
 import pandas as pd
 import pytest
 
-from src.sentiment import SCORED_HEADLINE_COLUMNS, load_vader_analyzer, summarize_news_mood, score_headline_sentiment
+from src.sentiment import (SCORED_HEADLINE_COLUMNS, SENTIMENT_FEATURE_COLUMNS, daily_sentiment_features,
+                           load_vader_analyzer, score_headline_sentiment, summarize_news_mood)
 
 
 def fake_analyzer(titles):
@@ -97,8 +98,6 @@ def test_vader_score_equals_compound():
 
 
 # --- Daily sentiment features ------------------------------------------------------
-
-from src.sentiment import SENTIMENT_FEATURE_COLUMNS, daily_sentiment_features
 
 
 def dated_news(rows):

@@ -4,8 +4,9 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import TimeSeriesSplit
 
-from src.config import HORIZON_DAYS, RANDOM_STATE, TEST_DAYS
-from src.features import FEATURE_LABELS
+from src.config import HORIZON_DAYS, RANDOM_STATE, STAGE2_TEST_DAYS, TEST_DAYS
+from src.features import FEATURE_LABELS, add_above_label
+from src.sentiment import SENTIMENT_FEATURE_COLUMNS, daily_sentiment_features
 
 
 def time_split(X: pd.DataFrame, y: pd.Series, test_days: int = TEST_DAYS):
@@ -125,6 +126,47 @@ def walk_forward_predictions(X: pd.DataFrame, y_return: pd.Series, n_splits: int
         model = train_regressor(X.iloc[train_rows], y_return.iloc[train_rows])
         predictions.iloc[test_rows] = model.predict(X.iloc[test_rows])
     return predictions
+
+
+# Stage 2 inputs: the news mood plus what stage 1 predicted.
+STAGE2_COLUMNS = SENTIMENT_FEATURE_COLUMNS + ["predicted_return"]
+MIN_STAGE2_TRAIN_DAYS = 100  # fewer labelled news days than this = no verdict
+
+
+def run_stage2(X: pd.DataFrame, y_return: pd.Series, close: pd.Series,
+               scored_news: pd.DataFrame, latest_predicted_return: float):
+    """Stage 2: will the real price end up ABOVE the stage 1 prediction?
+
+    Trains on days covered by the news history, using out-of-sample stage 1
+    predictions. Scores itself on the last STAGE2_TEST_DAYS against the same model
+    without news ("price only") and against "always above" (baseline_accuracy).
+    Returns None if there isn't enough news history.
+    """
+    if scored_news.empty:
+        return None
+    predicted_return = walk_forward_predictions(X, y_return).rename("predicted_return")
+    above = add_above_label(close, close.loc[X.index] * (1 + predicted_return))
+    news_start = pd.to_datetime(scored_news["published"], utc=True).min().tz_localize(None).normalize()
+
+    news_features = daily_sentiment_features(scored_news, close.index)
+    data = news_features.join(predicted_return).assign(above=above).dropna()
+    data = data[data.index >= news_start]
+    if len(data) < STAGE2_TEST_DAYS + MIN_STAGE2_TRAIN_DAYS:
+        return None
+
+    X2, y2 = data[STAGE2_COLUMNS], data["above"].astype(int)
+    X2_train, X2_test, y2_train, y2_test = time_split(X2, y2, STAGE2_TEST_DAYS)
+    held_out_model = train_model(X2_train, y2_train)
+    price_only = ["predicted_return"]
+    latest = news_features.iloc[[-1]].assign(predicted_return=latest_predicted_return)
+    return {
+        "prob_above": predict_latest(train_model(X2, y2), latest[STAGE2_COLUMNS]),
+        "news_today": latest.iloc[0],
+        "with_news": evaluate(held_out_model, X2_test, y2_test),
+        "price_only": evaluate(train_model(X2_train[price_only], y2_train), X2_test[price_only], y2_test),
+        "test_probs": predict_proba_up(held_out_model, X2_test),
+        "train_days": len(X2_train),
+    }
 
 
 def feature_importance(model) -> pd.Series:

@@ -11,6 +11,7 @@ from src.model import (
     feature_importance,
     predict_latest,
     predict_price,
+    run_stage2,
     time_split,
     train_model,
     train_regressor,
@@ -148,3 +149,38 @@ def test_walk_forward_never_sees_the_future():
     # approx: parallel trees add up in a random order, so the last digits wobble.
     assert after.iloc[100:500].values == pytest.approx(before.iloc[100:500].values)
     assert after.iloc[500:].values != pytest.approx(before.iloc[500:].values)
+
+
+# --- Stage 2: above / below -----------------------------------------------------
+
+
+def make_stage2_data(n=900, seed=0, news_days=None):
+    """Random-walk prices; the news each day 'knows' whether the next 5 days go up."""
+    rng = np.random.default_rng(seed)
+    days = pd.bdate_range("2020-01-01", periods=n + 5)
+    close = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.02, n + 5))), index=days)
+    y = (close.shift(-5) / close - 1).iloc[:n]
+    X = pd.DataFrame(rng.normal(size=(n, len(FEATURE_COLUMNS))), index=y.index, columns=FEATURE_COLUMNS)
+    news_index = y.index if news_days is None else y.index[-news_days:]
+    sign = np.sign(y.loc[news_index]).values
+    news = pd.DataFrame({"published": news_index.tz_localize("UTC") + pd.Timedelta(hours=12),
+                         "score": 0.8 * sign,
+                         "label": np.where(sign > 0, "positive", "negative")})
+    return X, y, close, news
+
+
+def test_stage2_news_beats_price_only_when_news_is_informative():
+    X, y, close, news = make_stage2_data()
+    result = run_stage2(X, y, close, news, latest_predicted_return=0.0)
+
+    assert result["with_news"]["model_accuracy"] > result["price_only"]["model_accuracy"] + 0.1
+    assert 0.0 <= result["prob_above"] <= 1.0
+    assert len(result["test_probs"]) == 126
+
+
+def test_stage2_without_enough_news_gives_no_verdict():
+    X, y, close, _ = make_stage2_data()
+    _, _, _, thin = make_stage2_data(news_days=150)
+    empty = thin.iloc[0:0]
+    assert run_stage2(X, y, close, empty, 0.0) is None
+    assert run_stage2(X, y, close, thin, 0.0) is None

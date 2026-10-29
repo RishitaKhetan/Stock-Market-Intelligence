@@ -9,7 +9,7 @@ import streamlit as st
 
 from src.backtest import run_backtest
 from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
-from src.data import load_news_headlines, load_price_history, normalize_ticker_symbol
+from src.data import load_news_headlines, load_news_history, load_price_history, normalize_ticker_symbol
 from src.features import add_moving_averages, make_dataset, make_price_dataset
 from src.model import (
     evaluate,
@@ -18,6 +18,7 @@ from src.model import (
     predict_latest,
     predict_price,
     predict_proba_up,
+    run_stage2,
     time_split,
     train_model,
     train_regressor,
@@ -63,9 +64,17 @@ def run_model(ticker: str) -> dict:
     price_evaluation = evaluate_regression(train_regressor(Xp_train, yp_train), Xp_test,
                                            yp_test, closes.loc[Xp_test.index])
     final_regressor = train_regressor(X_p, y_p)
+    predicted_price = predict_price(final_regressor, latest_p, prices["Close"].iloc[-1])
+
+    # Stage 2: does the news say the real price will land above or below that?
+    news_history = get_news_history(ticker)
+    verdict = run_stage2(X_p, y_p, prices["Close"], news_history,
+                         predicted_price / prices["Close"].iloc[-1] - 1)
     return {
         "prob_up": predict_latest(final_model, latest_row),
-        "predicted_price": predict_price(final_regressor, latest_p, prices["Close"].iloc[-1]),
+        "predicted_price": predicted_price,
+        "verdict": verdict,
+        "news_history_size": len(news_history),
         "importance": feature_importance(final_regressor),
         "evaluation": evaluation,
         "price_evaluation": price_evaluation,
@@ -77,6 +86,17 @@ def run_model(ticker: str) -> dict:
 def get_analyzer():
     """Load the sentiment model once and share it across all users and reruns."""
     return load_sentiment_analyzer()
+
+
+@st.cache_data(ttl=3600, show_spinner="Collecting 2 years of news (the first run for a stock "
+                                       "takes several minutes)...")
+def get_news_history(ticker: str) -> pd.DataFrame:
+    """Scored dated headlines for training stage 2. Empty if anything goes wrong."""
+    analyzer, _ = get_analyzer()
+    try:
+        return load_news_history(ticker, lambda titles: score_headline_sentiment(titles, analyzer))
+    except Exception:
+        return pd.DataFrame(columns=["published", "score", "label"])
 
 
 @st.cache_data(ttl=1800, show_spinner="Reading the news with FinBERT...")
@@ -189,6 +209,17 @@ if st.session_state.analyzed is not None:
         predicted = result["predicted_price"]
         st.metric(f"Predicted price in {HORIZON_DAYS} trading days", f"{predicted:,.2f}",
                   delta=f"{(predicted / latest_close - 1) * 100:+.2f}% vs latest close")
+        verdict = result["verdict"]
+        if verdict is None:
+            st.info("Not enough news history for an above/below verdict on this stock.")
+        else:
+            above_pct = round(verdict["prob_above"] * 100)
+            side, color = ("ABOVE", "green") if above_pct >= 50 else ("BELOW", "red")
+            st.markdown(f"### News says: :{color}[likely {side}] that price "
+                        f"({max(above_pct, 100 - above_pct)}%)")
+            today = verdict["news_today"]
+            st.caption(f"Based on {int(today['news_count'])} headlines from the last week "
+                       f"(average mood {today['news_mean']:+.2f}).")
         # Colour by the rounded number shown, so "UP 50%" is never painted red.
         up_pct = round(result["prob_up"] * 100)
         color = "green" if up_pct > 50 else "red" if up_pct < 50 else "gray"
@@ -269,6 +300,20 @@ if st.session_state.analyzed is not None:
         "which the model never saw during training. The baseline guesses today's price, "
         "so the model must miss by less to be useful."
     )
+
+    if result["verdict"] is not None:
+        with_news, price_only = result["verdict"]["with_news"], result["verdict"]["price_only"]
+        st.subheader("Above / below verdict")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("With news", f"{with_news['model_accuracy']:.1%}")
+        col2.metric("Price only (no news)", f"{price_only['model_accuracy']:.1%}")
+        col3.metric('Baseline: "always above"', f"{with_news['baseline_accuracy']:.1%}")
+        st.caption(
+            f"Share of right above/below calls on {with_news['test_start'].date()} to "
+            f"{with_news['test_end'].date()}, after training on {result['verdict']['train_days']} days "
+            f"({result['news_history_size']:,} headlines in total). The news only helps if "
+            "\"With news\" beats both others. With this little history, expect noisy results."
+        )
 
     # --- Backtest ----------------------------------------------------------
     # Indian stocks are priced in rupees, the rest in dollars.
