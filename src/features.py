@@ -1,4 +1,4 @@
-"""Turning raw prices into indicators, model features and the UP/DOWN label.
+"""Turning raw prices into indicators, model features and the labels.
 
 Golden rule (no look-ahead leakage): a feature on day t may only use data
 up to and including day t. Only the label looks into the future.
@@ -89,18 +89,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return features.replace([np.inf, -np.inf], np.nan)[FEATURE_COLUMNS]
 
 
-def add_label(df: pd.DataFrame, horizon: int = HORIZON_DAYS) -> pd.DataFrame:
-    """Add the answer the model must learn: did the price go UP over `horizon` days?
-
-    target = 1 if Close[t + horizon] > Close[t], else 0.
-    The last `horizon` days don't have a known future yet, so target is NaN.
-    """
-    df = df.copy()
-    future_close = df["Close"].shift(-horizon)   # the price `horizon` rows later
-    df["target"] = (future_close > df["Close"]).astype(float)
-    df.loc[future_close.isna(), "target"] = np.nan
-    return df
-
 
 def add_return_label(df: pd.DataFrame, horizon: int = HORIZON_DAYS) -> pd.DataFrame:
     """Add the number the price model must learn: the return over the next `horizon` days.
@@ -128,12 +116,13 @@ def add_above_label(close: pd.Series, predicted_price: pd.Series,
 
 
 def make_price_dataset(df: pd.DataFrame):
-    """Like make_dataset, but the answer is a return (a number), not UP/DOWN.
+    """Split a price table into what the price model trains on and what it predicts.
 
     Returns:
         X: features for every day with full features and a known future return
         y: the matching future returns
-        latest_row: features of the most recent day, for today's prediction
+        latest_row: features of the most recent day (future still unknown),
+                    used for today's live prediction (a 1-row DataFrame)
         closes: the Close price on each day of X (turns returns into prices)
     """
     features = build_features(df)
@@ -146,21 +135,3 @@ def make_price_dataset(df: pd.DataFrame):
     closes = df["Close"].loc[X.index]
     return X, y, latest_row, closes
 
-
-def make_dataset(df: pd.DataFrame):
-    """Split a price table into what the model trains on and what it predicts.
-
-    Returns:
-        X: features for every day that has both full features and a known label
-        y: the matching 0/1 labels
-        latest_row: features of the most recent day (label still unknown),
-                    used for today's live prediction
-    """
-    features = build_features(df)
-    target = add_label(df)["target"]
-
-    labelled = features.join(target).dropna()
-    X = labelled[FEATURE_COLUMNS]
-    y = labelled["target"].astype(int)
-    latest_row = features.iloc[[-1]]   # double brackets keep it a 1-row DataFrame
-    return X, y, latest_row

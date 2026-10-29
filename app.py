@@ -10,17 +10,13 @@ import streamlit as st
 from src.backtest import run_backtest
 from src.config import CHART_DAYS, HORIZON_DAYS, MA_LONG, MA_SHORT, POPULAR_TICKERS
 from src.data import load_news_headlines, load_news_history, load_price_history, normalize_ticker_symbol
-from src.features import add_moving_averages, make_dataset, make_price_dataset
+from src.features import add_moving_averages, make_price_dataset
 from src.model import (
-    evaluate,
     evaluate_regression,
     feature_importance,
-    predict_latest,
     predict_price,
-    predict_proba_up,
     run_stage2,
     time_split,
-    train_model,
     train_regressor,
 )
 from src.sentiment import load_sentiment_analyzer, summarize_news_mood, score_headline_sentiment
@@ -45,24 +41,18 @@ def get_prices(ticker: str):
 @st.cache_data(ttl=3600, show_spinner="Training the model...")
 def run_model(ticker: str) -> dict:
     """Train, test on the last year, then retrain on everything for today's call."""
-    X, y, latest_row = make_dataset(get_prices(ticker))
-
-    # 1) Honest score: train on older data, test on the most recent year.
-    X_train, X_test, y_train, y_test = time_split(X, y)
-    held_out_model = train_model(X_train, y_train)
-    evaluation = evaluate(held_out_model, X_test, y_test)
-    # P(UP) on each test day, from the model that never saw those days (for the backtest).
-    test_probs = predict_proba_up(held_out_model, X_test)
-
-    # 2) Live prediction: retrain on all labelled days so it knows the newest data.
-    final_model = train_model(X, y)
-
-    # Stage 1: the same steps, but predicting the price in HORIZON_DAYS days.
     prices = get_prices(ticker)
     X_p, y_p, latest_p, closes = make_price_dataset(prices)
+
+    # 1) Honest score: train on older data, test on the most recent year.
     Xp_train, Xp_test, yp_train, yp_test = time_split(X_p, y_p)
-    price_evaluation = evaluate_regression(train_regressor(Xp_train, yp_train), Xp_test,
-                                           yp_test, closes.loc[Xp_test.index])
+    held_out_regressor = train_regressor(Xp_train, yp_train)
+    price_evaluation = evaluate_regression(held_out_regressor, Xp_test, yp_test,
+                                           closes.loc[Xp_test.index])
+    # Predicted return on each test day, from the model that never saw those days (for the backtest).
+    stage1_test_returns = pd.Series(held_out_regressor.predict(Xp_test), index=Xp_test.index)
+
+    # 2) Live prediction: retrain on all labelled days so it knows the newest data.
     final_regressor = train_regressor(X_p, y_p)
     predicted_price = predict_price(final_regressor, latest_p, prices["Close"].iloc[-1])
 
@@ -71,14 +61,12 @@ def run_model(ticker: str) -> dict:
     verdict = run_stage2(X_p, y_p, prices["Close"], news_history,
                          predicted_price / prices["Close"].iloc[-1] - 1)
     return {
-        "prob_up": predict_latest(final_model, latest_row),
         "predicted_price": predicted_price,
         "verdict": verdict,
         "news_history_size": len(news_history),
         "importance": feature_importance(final_regressor),
-        "evaluation": evaluation,
         "price_evaluation": price_evaluation,
-        "test_probs": test_probs,
+        "stage1_test_returns": stage1_test_returns,
     }
 
 
@@ -220,12 +208,8 @@ if st.session_state.analyzed is not None:
             today = verdict["news_today"]
             st.caption(f"Based on {int(today['news_count'])} headlines from the last week "
                        f"(average mood {today['news_mean']:+.2f}).")
-        # Colour by the rounded number shown, so "UP 50%" is never painted red.
-        up_pct = round(result["prob_up"] * 100)
-        color = "green" if up_pct > 50 else "red" if up_pct < 50 else "gray"
-        st.markdown(f"## :{color}[UP {up_pct}% / DOWN {100 - up_pct}%]")
-        st.caption(f"Probability the price is higher in {HORIZON_DAYS} trading days. "
-                   "Not a guarantee.")
+        st.caption("Stage 1 predicts the price from price history; stage 2 reads the news "
+                   "to say if the real price will land above or below it. Not a guarantee.")
 
     with right:
         importance = result["importance"]
@@ -318,25 +302,35 @@ if st.session_state.analyzed is not None:
     # --- Backtest ----------------------------------------------------------
     # Indian stocks are priced in rupees, the rest in dollars.
     money = "₹" if ticker.endswith((".NS", ".BO")) else "$"
-    bt = run_backtest(prices, result["test_probs"])
-    final_strategy = bt["strategy_value"].iloc[-1]
-    final_hold = bt["buy_hold_value"].iloc[-1]
+    # Stage 1 invests when it predicts a rise; "+ news" also needs the verdict to say ABOVE.
+    stage1_signal = (result["stage1_test_returns"] > 0).astype(float)
+    signals = {"Stage 1 only": stage1_signal}
+    if result["verdict"] is not None:
+        news_probs = result["verdict"]["test_probs"]   # stage 2's test days (the last ~6 months)
+        stage1_signal = stage1_signal.reindex(news_probs.index).fillna(0.0)
+        signals = {"Stage 1 only": stage1_signal,
+                   "Stage 1 + news": stage1_signal * (news_probs >= 0.5)}
+    runs = {name: run_backtest(prices, signal) for name, signal in signals.items()}
+    bt = next(iter(runs.values()))
 
     st.header("Backtest: would following the model have paid off?")
-    col1, col2, col3 = st.columns(3)
-    col1.metric(f"{money}100 following the model", f"{money}{final_strategy:,.2f}",
-                delta=f"{final_strategy - 100:+.1f}%")
-    col2.metric(f"{money}100 just holding the stock", f"{money}{final_hold:,.2f}",
-                delta=f"{final_hold - 100:+.1f}%")
-    col3.metric("Days invested", f"{bt['invested'].sum()} of {len(bt)}")
+    cols = st.columns(len(runs) + 1)
+    for col, (name, run) in zip(cols, runs.items()):
+        final = run["strategy_value"].iloc[-1]
+        col.metric(f"{money}100 following {name.lower()}", f"{money}{final:,.2f}",
+                   delta=f"{final - 100:+.1f}%")
+        col.caption(f"Invested {run['invested'].sum()} of {len(run)} days")
+    final_hold = bt["buy_hold_value"].iloc[-1]
+    cols[-1].metric(f"{money}100 just holding the stock", f"{money}{final_hold:,.2f}",
+                    delta=f"{final_hold - 100:+.1f}%")
 
     line = go.Figure()
-    line.add_trace(go.Scatter(x=bt.index, y=bt["strategy_value"],
-                              name="Following the model", line=dict(width=2)))
+    for name, run in runs.items():
+        line.add_trace(go.Scatter(x=run.index, y=run["strategy_value"], name=name, line=dict(width=2)))
     line.add_trace(go.Scatter(x=bt.index, y=bt["buy_hold_value"],
                               name="Just holding the stock", line=dict(dash="dash")))
     line.update_layout(
-        title=f"{money}100 following the model vs {money}100 just holding the stock",
+        title=f"{money}100 following the models vs {money}100 just holding the stock",
         xaxis_title="Date",
         yaxis_title=f"Value ({money})",
         hovermode="x unified",
@@ -344,10 +338,10 @@ if st.session_state.analyzed is not None:
     )
     st.plotly_chart(line, width="stretch")
     st.caption(
-        f"Same test year as above ({bt.index[0].date()} to {bt.index[-1].date()}). "
-        f"The model invests for the next day only when it says UP is more likely than DOWN, "
-        "otherwise it holds cash. Ignores trading costs and taxes. "
-        "Past results do not predict future results."
+        f"Test days only ({bt.index[0].date()} to {bt.index[-1].date()}), which the models never "
+        "trained on. Each day, a strategy holds the stock for the next day only if stage 1 predicts "
+        "a rise (and, for \"+ news\", stage 2 says ABOVE); otherwise it holds cash. "
+        "Ignores trading costs and taxes. Past results do not predict future results."
     )
 
 # --- How it works (always shown at the bottom) ---------------------------------
@@ -358,15 +352,18 @@ with st.expander("How it works"):
 2. **Features:** from the prices we compute 8 simple signals, such as recent returns,
    distance from the 20- and 50-day averages, volatility, RSI and volume change.
    Each one uses only data up to that day, never the future.
-3. **Model:** a random forest (many small decision trees that vote) learns whether
-   the price was higher {HORIZON_DAYS} trading days later. The "Why this prediction?"
-   chart shows which signals it relied on most.
+3. **Stage 1, price model:** a random forest (many small decision trees that vote) learns
+   the return over the next {HORIZON_DAYS} trading days, turned into a predicted price.
+   The "Why this prediction?" chart shows which signals it relied on most.
 4. **Honest testing:** it trains on older years and is scored on the most recent year,
-   which it never saw. It is compared with simply guessing "UP" every day.
-5. **News mood:** recent headlines are scored by FinBERT, a language model trained
-   on financial text, as positive, negative or neutral. The news is shown alongside
-   the prediction and is not an input to the model.
-6. **Backtest:** we replay the test year, investing only on days the model said UP,
-   and compare the result with simply holding the stock.
+   which it never saw. It is compared with simply guessing "no change".
+5. **News mood:** headlines are scored by FinBERT, a language model trained on financial
+   text, as positive, negative or neutral.
+6. **Stage 2, news verdict:** about 2 years of dated Google News headlines give a news mood
+   for every past day. A second model learns from that mood whether the real price ended
+   up above or below stage 1's prediction, and is scored against the same model without
+   news and against "always above".
+7. **Backtest:** we replay the test days, investing only when stage 1 predicts a rise
+   (and, with news, when stage 2 says above), and compare with simply holding the stock.
 """
     )

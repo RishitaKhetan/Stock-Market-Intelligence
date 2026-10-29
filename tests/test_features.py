@@ -7,13 +7,11 @@ import pytest
 from src.features import (
     FEATURE_COLUMNS,
     FEATURE_LABELS,
-    add_label,
     add_above_label,
     add_moving_averages,
     add_return_label,
     build_features,
     compute_rsi,
-    make_dataset,
     make_price_dataset,
 )
 
@@ -98,38 +96,6 @@ def test_rsi_extremes():
 def test_rsi_stays_between_0_and_100():
     rsi = compute_rsi(make_random_prices()["Close"]).dropna()
     assert rsi.between(0, 100).all()
-
-
-# --- Label -------------------------------------------------------------------
-
-def test_label_rising_series():
-    horizon = 5
-    df = add_label(make_prices(range(1, 101)), horizon=horizon)
-
-    assert (df["target"].iloc[:-horizon] == 1).all()
-    assert df["target"].iloc[-horizon:].isna().all()
-
-
-def test_label_falling_series_is_all_down():
-    df = add_label(make_prices(range(100, 0, -1)), horizon=5)
-    assert (df["target"].iloc[:-5] == 0).all()
-
-
-# --- Dataset -----------------------------------------------------------------
-
-def test_make_dataset_shapes_and_latest_row():
-    prices = make_random_prices()
-    X, y, latest_row = make_dataset(prices)
-
-    assert list(X.columns) == FEATURE_COLUMNS
-    assert X.index.equals(y.index)
-    assert X.notna().all().all() and y.notna().all()
-    assert set(y.unique()) <= {0, 1}
-    # Warm-up rows at the start and the last 5 unlabelled rows are dropped.
-    assert len(X) == len(prices) - WARM_UP + 1 - 5
-    # The live prediction uses the most recent day in the data.
-    assert latest_row.index[-1] == prices.index[-1]
-    assert len(latest_row) == 1
 
 
 # --- Return label and price dataset (stage 1) ---------------------------------

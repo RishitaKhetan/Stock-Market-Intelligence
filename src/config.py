@@ -1,6 +1,6 @@
 """Project-wide constants. Change values here, not inside the modules."""
 
-HORIZON_DAYS = 5          # predict direction 5 trading days ahead
+HORIZON_DAYS = 5          # predict the price 5 trading days ahead
 HISTORY_PERIOD = "5y"     # how much price history to download
 TEST_DAYS = 252           # last ~1 year held out for testing
 CHART_DAYS = 126          # ~6 months shown on the price chart
